@@ -1,4 +1,22 @@
-# SeaNav.Ros2
+# SeaNav.Ros2 — `windows` branch
+
+> ### You are on the Windows branch
+>
+> This branch is `main` plus the work needed to make the library load ROS 2 on Windows. Everything
+> in `main` is here too, so read this README as the whole picture, not as a patch.
+>
+> **Start with [docs/WINDOWS.md](docs/WINDOWS.md).** It covers installing ROS 2 on Windows the easy
+> way — three commands via pixi, rather than the official installer's dependency hunt — and the one
+> trap that will catch you first: the folder you need is `<env>\Library\bin`, not `<env>\lib`.
+>
+> **Honest status: written and reasoned, not yet run on Windows.** It compiles, the design follows
+> Microsoft's documented loader contract, and the Linux path is verified unaffected. Nobody has
+> executed it on a Windows machine. If you are the first, please report back either way — that
+> sentence gets replaced when somebody has.
+>
+> Why a branch at all: `main` stays a thing that is fully verified on the platform it was tested
+> on. Merging unrun code into it would quietly lower that bar. See
+> [What changed for Windows](#what-changed-for-windows).
 
 **ROS 2 from C#. No code generator, no generated native libraries, no colcon.**
 
@@ -34,13 +52,15 @@ using (var node = ros.CreateNode("my_node"))
 - [Services and clients](#services-and-clients)
 - [Parameters](#parameters)
 - [Actions](#actions)
+- [Waiting instead of polling](#waiting-instead-of-polling)
 - [Quality of Service](#quality-of-service)
 - [Message types](#message-types)
 - [Testing](#testing)
 - [How it works inside](#how-it-works-inside)
 - [Porting to another distribution](#porting-to-another-distribution)
+- [**What changed for Windows**](#what-changed-for-windows)
 - [Known limits](#known-limits)
-- [Windows](docs/WINDOWS.md)
+- [**Installing and running on Windows**](docs/WINDOWS.md)
 
 ---
 
@@ -55,7 +75,7 @@ using (var node = ros.CreateNode("my_node"))
 | Custom message and service types | yes — see [Message types](#message-types) |
 | **Parameters** | **yes** — `ros2 param list/get/set/describe` |
 | **Actions** | **yes** — goals, feedback, cancel, result |
-| Wait sets (blocking instead of polling) | no |
+| **Wait sets — block instead of polling** | **yes** — 0.25% of a core instead of 100% |
 
 Every "yes" above was checked by running the ordinary ROS command-line tools against a node from
 this library. Not by a test that calls our own code — by the same programs a ROS user already has.
@@ -351,6 +371,68 @@ Three edges that are easy to get wrong and are handled here:
 
 ---
 
+## Waiting instead of polling
+
+### The problem
+
+Everything else here **polls**: you call `TryTake`, and it tells you whether anything arrived. That
+suits a simulator, which already runs a loop at a fixed rate and wants commands once per step.
+
+It suits nothing else. A program whose only job is to listen has no natural rate, so it either
+sleeps — adding latency it did not need — or spins, asking "anything yet?" millions of times a
+second and burning a whole CPU core to hear nothing.
+
+A **wait set** fixes that: hand the middleware everything you care about, and it puts the thread to
+sleep until one of them is ready or your timeout expires.
+
+```csharp
+using (var wait = new Ros2WaitSet(context))
+{
+    wait.Add(subscription);
+    wait.Add(service);
+
+    while (running)
+    {
+        if (!wait.Wait(1.0)) continue;          // nothing arrived in a second
+
+        if (wait.IsReady(subscription)) { /* ... */ }
+        if (wait.IsReady(service))      { /* ... */ }
+    }
+}
+```
+
+### What it costs, measured
+
+The same program for the same eight seconds, changing only how it waits:
+
+| | CPU used | Of one core |
+|---|---|---|
+| **Wait set** | 0.020 s | **0.25%** |
+| Polling | 8.010 s | **100.10%** |
+
+Run it yourself — the polling loop is kept in the demo precisely so this is a measurement rather
+than a claim:
+
+```bash
+dotnet run --project examples/WaitSetDemo -- 8
+dotnet run --project examples/WaitSetDemo -- 8 --poll
+```
+
+### Two things to know
+
+**Add once, wait many times.** The registrations are kept on the C# side and re-applied on every
+`Wait`. That is not a skipped optimisation — `rcl_wait` *prunes* the set it is given, overwriting
+every entry that was not ready with null, so a set is single-use. Doing the refill for you removes
+the most common way this API is misused: waiting twice and wondering why the second call never
+reports anything.
+
+**Not on Unity's main thread.** Blocking is the entire point, and blocking the thread that renders
+frames will freeze the editor. In Unity, keep polling on the main thread and use a wait set on a
+background thread or in a headless process. An instance must also not be waited on from two threads
+at once — rcl documents that as undefined behaviour, not as an error you are told about.
+
+---
+
 ## Quality of Service
 
 **Read this bit even if you skip the rest**, because it catches everyone once: if a publisher and a
@@ -449,6 +531,7 @@ actual observed results, not a description of what should happen:
 | `ros2 param list` / `get` / `set` / `describe` | all four work |
 | `ros2 param set` on a read-only parameter | refused, **with our reason shown by the CLI** |
 | `ros2 action send_goal /fibonacci ... --feedback` | feedback streamed, `SUCCEEDED`, `0 1 1 2 3 5 8 13` |
+| `ros2 topic pub` into a wait set | woke on each message; 0.25% of a core while idle |
 
 Run the demos yourself:
 
@@ -456,6 +539,7 @@ Run the demos yourself:
 dotnet run --project examples/ServiceDemo
 dotnet run --project examples/ParameterDemo
 dotnet run --project examples/ActionDemo
+dotnet run --project examples/WaitSetDemo
 ```
 
 Then, in a second terminal with ROS sourced, poke at them with the commands in the table.
@@ -511,22 +595,78 @@ claiming support for anything else.
 
 ---
 
+## What changed for Windows
+
+Only the loader. Everything above this line — publishing, subscribing, services, parameters,
+actions, wait sets — is the same code on both platforms and needed no Windows-specific work at all.
+That is worth saying, because it means Windows support is a small, contained change rather than a
+parallel implementation to keep in step.
+
+### The bug this branch fixes
+
+ROS 2's libraries depend on each other **by bare name** and are built without an embedded search
+path. So loading `rcl` means the operating system then has to find the eleven-odd libraries it
+needs, and it looks along the system search path — which a program started from an icon never
+inherited.
+
+On Linux there is a workaround, and this library already used it: `dlerror` *names* the dependency
+it could not find, so we load that one from our folder and retry.
+
+**On Windows that recovery silently did nothing.** `LoadLibrary` reports "the specified module could
+not be found" and does not say *which* module, so there was nothing to retry on. The parser never
+matched, the loop exited immediately, and the one situation the loader exists for — a process that
+never inherited the ROS environment, which on Windows is every double-clicked build — was exactly
+the situation that failed.
+
+### The fix
+
+Windows has a proper mechanism for this, so the Linux hack is not needed there at all:
+
+| | |
+|---|---|
+| `AddDllDirectory` | registers the folder holding ROS's DLLs |
+| `LOAD_LIBRARY_SEARCH_DEFAULT_DIRS` | search the app folder, System32, and registered folders |
+| `LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR` | search the folder a DLL came from, for *its* dependencies |
+
+Microsoft's documentation is explicit that these cover the DLL **and its dependencies**, not just
+the named file, which is the whole reason this works where the old code did not.
+
+**Deliberately not calling `SetDefaultDllDirectories`.** Without it, folders registered by
+`AddDllDirectory` are used *only* by our own `LoadLibraryEx` calls, so the process-wide DLL search
+order is left alone. That matters inside Unity, which loads many native plugins of its own and
+would be entirely within its rights to break if we quietly changed the rules underneath it.
+
+### Three smaller things
+
+- **`LoadLibraryExW`, not the ANSI entry point.** ROS on Windows usually lives under
+  `C:\Users\<name>`, and a name outside the system code page cannot be expressed in ANSI at all.
+- **Real error text**, via `FormatMessage`, instead of a bare number. Error 126 was the only failure
+  that actually happened and told the reader nothing — and it is ambiguous besides, reported both
+  when the DLL is missing *and* when a dependency is, so the message now says so.
+- **Platform-appropriate advice.** The failure message used to tell Windows users to
+  `source setup.bash`, sending them to look for a file that does not exist there.
+
+`NativeLoader.FindRosLibraryFolder()` also guesses where ROS is — an active conda/pixi environment
+first, then `AMENT_PREFIX_PATH`, then the conventional locations — so nobody has to type a path they
+may not know. It only ever improves an error message or serves as an opt-in convenience; it never
+silently overrides a folder you set yourself.
+
+---
+
 ## Known limits
 
-- **No wait sets — polling only.** Nothing blocks until a message arrives; `rcl_wait` would be the
-  way and isn't wired up. Fine for a simulator with its own loop, which is already running at a
-  fixed rate; wasteful for an idle listener, which will spin a core doing nothing. Sleep in the
-  loop, as the Listener example does.
-- **Parameter callbacks are not wired.** You are told a parameter changed by reading it; there is
-  no "on change" hook yet. The change topic is published so external tools see it.
-- **No action result expiry.** A finished goal's result is kept for the life of the server rather
-  than discarded after the ROS-conventional timeout. Harmless for a simulator run, a slow leak for
-  a process running for weeks.
-- **Windows support is written but not yet run on Windows.** The loader uses the documented Win32
-  search-flag mechanism rather than the Linux dlerror trick, which silently did nothing there. It
-  compiles and the Linux path is verified unaffected; nobody has executed it on Windows yet, and
-  this line will change when someone has. See [docs/WINDOWS.md](docs/WINDOWS.md), which also covers
-  installing ROS 2 on Windows via pixi — far less painful than the official route.
+- **No timers or guard conditions in a wait set.** Subscriptions, clients and services can be
+  waited on; `rcl`'s timers and guard conditions are not wired up. A guard condition is the
+  conventional way to wake a wait set early from another thread, so today the way to interrupt one
+  is a short timeout.
+- **No QoS events.** Deadline missed, liveliness lost and incompatible-QoS notifications are not
+  surfaced. They are the honest way to detect a publisher that has gone quiet, as opposed to one
+  with nothing to say.
+- **Windows is written and reasoned, but has not been run on Windows.** This branch replaces the
+  Linux `dlerror` recovery — which silently did nothing on Windows — with the documented Win32
+  search-flag mechanism. It compiles, and the Linux path is verified unaffected. Nobody has
+  executed it on Windows yet, and **this line changes when somebody has**. See
+  [docs/WINDOWS.md](docs/WINDOWS.md).
 - **x86-64 only.** No ARM has been tried, on any platform.
 
 ---

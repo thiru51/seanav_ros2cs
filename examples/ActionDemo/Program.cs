@@ -59,12 +59,27 @@ internal static class Program
 
             server.OnCancel = goal => Console.WriteLine("cancel asked for " + goal);
 
+            // Shorter than the ROS default of 10s so the demo can show a result
+            // being forgotten without anyone waiting around for it.
+            server.ResultTimeoutSeconds = 3.0;
+
+            int lastKnown = -1;
+
             double t = 0;
             DateTime giveUp = DateTime.UtcNow.AddSeconds(seconds);
 
             while (DateTime.UtcNow < giveUp && ros.Ok)
             {
                 server.Spin(t);
+
+                int known = 0;
+                foreach (var g in server.Goals) known++;
+                if (known != lastKnown)
+                {
+                    Console.WriteLine(string.Format(
+                        "GOALS t={0:F1} remembered={1} expired={2}", t, known, server.Expired));
+                    lastKnown = known;
+                }
 
                 if (running != null && running.Active)
                 {
