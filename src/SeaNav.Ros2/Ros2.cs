@@ -48,6 +48,13 @@ namespace SeaNav.Ros2
         public RclInterop.Allocator Allocator { get; }
 
         /// <summary>
+        /// Set when we could not preload the DDS backend. Usually harmless - a
+        /// sourced environment does not need our help - but worth having if
+        /// rcl_init then fails for a reason that sounds unrelated.
+        /// </summary>
+        public static string RmwPreloadNote { get; private set; }
+
+        /// <summary>
         /// Starts ROS 2.
         /// </summary>
         /// <param name="rosLibraryFolder">
@@ -59,7 +66,59 @@ namespace SeaNav.Ros2
         public Ros2Context(string rosLibraryFolder = null)
         {
             if (!string.IsNullOrEmpty(rosLibraryFolder))
+            {
                 NativeLoader.SearchPath = rosLibraryFolder;
+
+                // ROS needs one environment variable that loading libraries by
+                // hand does not provide. librmw_implementation asks ament where
+                // the actual DDS library lives, and ament reads AMENT_PREFIX_PATH.
+                // Without it rcl_init fails with
+                //
+                //   failed to get symbol 'rmw_init_options_init' due to
+                //   Environment variable 'AMENT_PREFIX_PATH' is not set or empty
+                //
+                // which is a confusing thing to hit when the libraries plainly did
+                // load. Derive it from the folder we were given: /opt/ros/jazzy/lib
+                // means a prefix of /opt/ros/jazzy.
+                //
+                // Only if it is not already set - a terminal that sourced ROS
+                // knows better than we do.
+                if (string.IsNullOrEmpty(NativeLoader.GetNativeEnvironment("AMENT_PREFIX_PATH")))
+                {
+                    string prefix = System.IO.Path.GetDirectoryName(
+                        rosLibraryFolder.TrimEnd('/', '\\'));
+
+                    if (!string.IsNullOrEmpty(prefix))
+                        NativeLoader.SetNativeEnvironment("AMENT_PREFIX_PATH", prefix);
+                }
+            }
+
+            // One more thing the loader cannot infer. rcl asks
+            // librmw_implementation for a DDS backend, and that library looks the
+            // backend up through ament and then dlopens it by name - which lands
+            // us back in the same search-path problem, one level down, reported
+            // as the unhelpful "failed to load any RMW implementations".
+            //
+            // Loading it ourselves fixes it: once a library is open with
+            // RTLD_GLOBAL the loader matches it by SONAME instead of going to the
+            // filesystem. Our loader pulls in its dependencies on the way.
+            if (!string.IsNullOrEmpty(rosLibraryFolder))
+            {
+                string rmw = NativeLoader.GetNativeEnvironment("RMW_IMPLEMENTATION");
+                if (string.IsNullOrEmpty(rmw)) rmw = "rmw_fastrtps_cpp";
+
+                try
+                {
+                    NativeLoader.Load(rmw);
+                }
+                catch (Exception e)
+                {
+                    // Not fatal on its own - a properly sourced environment gets
+                    // here without our help - so let rcl_init have its say rather
+                    // than pre-empting it with a worse message.
+                    RmwPreloadNote = e.Message;
+                }
+            }
 
             _contextPin = GCHandle.Alloc(_context, GCHandleType.Pinned);
 
