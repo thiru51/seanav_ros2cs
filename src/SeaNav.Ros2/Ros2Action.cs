@@ -36,6 +36,16 @@ namespace SeaNav.Ros2
         /// <summary>The result, once there is one.</summary>
         public byte[] ResultCdr { get; internal set; }
 
+        /// <summary>
+        /// When this goal finished, on the caller's clock. NaN while it runs.
+        /// </summary>
+        /// <remarks>
+        /// Only used to decide when the result may be forgotten. NaN rather than
+        /// zero because zero is a perfectly good simulation time and would make
+        /// every running goal look infinitely old.
+        /// </remarks>
+        public double FinishedAt { get; internal set; } = double.NaN;
+
         internal ActionGoal(byte[] id, byte[] goalCdr)
         {
             Id = id;
@@ -146,6 +156,31 @@ namespace SeaNav.Ros2
         public string ActionName { get; }
 
         /// <summary>
+        /// How long a finished goal's result is kept before being discarded.
+        /// </summary>
+        /// <remarks>
+        /// <para>Ten seconds, which is what ROS itself uses — rcl_action's
+        /// documented default is <c>result_timeout = RCUTILS_S_TO_NS(10)</c>.
+        /// Matching it means a client written against any other ROS server
+        /// behaves the same way here.</para>
+        ///
+        /// <para>A result cannot be kept forever. Every finished goal holds its
+        /// result bytes, and a server running for weeks would accumulate every
+        /// goal it had ever been sent — slowly, invisibly, and without ever
+        /// looking like a leak, because each one is small and perfectly
+        /// reachable.</para>
+        ///
+        /// <para>Set it higher if clients may be slow to collect, or to
+        /// <see cref="double.PositiveInfinity"/> to keep everything — reasonable
+        /// for a short simulation run where the whole history is wanted, and a
+        /// slow leak in a long-lived process.</para>
+        /// </remarks>
+        public double ResultTimeoutSeconds { get; set; } = 10.0;
+
+        /// <summary>How many finished goals have been discarded after their timeout.</summary>
+        public long Expired { get; private set; }
+
+        /// <summary>
         /// Called when a goal arrives. Return false to reject it.
         /// </summary>
         /// <remarks>
@@ -215,6 +250,62 @@ namespace SeaNav.Ros2
             HandleCancel(nowSeconds);
             HandleGetResult();
             AnswerFinishedGoals();
+            ForgetOldResults(nowSeconds);
+        }
+
+        /// <summary>
+        /// Drops finished goals whose results nobody came back for.
+        /// </summary>
+        /// <remarks>
+        /// <para>Without this the server keeps every goal it has ever been sent,
+        /// each holding its result bytes. On a simulation run that is invisible;
+        /// in a process left up for weeks it is a leak that never looks like one,
+        /// because every object is small and legitimately reachable.</para>
+        ///
+        /// <para>Two things are deliberately never dropped. A goal still running
+        /// obviously stays. And a goal with a result request already waiting
+        /// stays even if it is old, because a client is on the other end of that
+        /// request — expiring it would answer a caller with "no such goal" for a
+        /// goal it watched succeed, which is a worse bug than the leak.</para>
+        /// </remarks>
+        private void ForgetOldResults(double now)
+        {
+            if (double.IsPositiveInfinity(ResultTimeoutSeconds)) return;
+            if (_goals.Count == 0) return;
+
+            List<string> drop = null;
+
+            foreach (KeyValuePair<string, ActionGoal> entry in _goals)
+            {
+                ActionGoal goal = entry.Value;
+
+                if (goal.Active) continue;
+                if (double.IsNaN(goal.FinishedAt)) continue;
+                if (now - goal.FinishedAt < ResultTimeoutSeconds) continue;
+
+                // Somebody is still waiting on this one.
+                bool awaited = false;
+                for (int i = 0; i < _pendingResults.Count; i++)
+                {
+                    if (string.Equals(_pendingResults[i].Key, entry.Key, StringComparison.Ordinal))
+                    {
+                        awaited = true;
+                        break;
+                    }
+                }
+                if (awaited) continue;
+
+                if (drop == null) drop = new List<string>();
+                drop.Add(entry.Key);
+            }
+
+            if (drop == null) return;
+
+            foreach (string key in drop)
+            {
+                _goals.Remove(key);
+                Expired++;
+            }
         }
 
         private void HandleSendGoal(double now)
@@ -329,6 +420,7 @@ namespace SeaNav.Ros2
 
             goal.Status = status;
             goal.ResultCdr = resultCdr ?? new byte[] { 0, 1, 0, 0 };
+            goal.FinishedAt = nowSeconds;
 
             PublishStatus(nowSeconds);
             AnswerFinishedGoals();
