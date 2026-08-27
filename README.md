@@ -40,6 +40,7 @@ using (var node = ros.CreateNode("my_node"))
 - [How it works inside](#how-it-works-inside)
 - [Porting to another distribution](#porting-to-another-distribution)
 - [Known limits](#known-limits)
+- [Windows](docs/WINDOWS.md)
 
 ---
 
@@ -521,7 +522,12 @@ claiming support for anything else.
 - **No action result expiry.** A finished goal's result is kept for the life of the server rather
   than discarded after the ROS-conventional timeout. Harmless for a simulator run, a slow leak for
   a process running for weeks.
-- **Linux x86-64 only** in practice. The Windows paths exist in the loader and are untested.
+- **Windows support is written but not yet run on Windows.** The loader uses the documented Win32
+  search-flag mechanism rather than the Linux dlerror trick, which silently did nothing there. It
+  compiles and the Linux path is verified unaffected; nobody has executed it on Windows yet, and
+  this line will change when someone has. See [docs/WINDOWS.md](docs/WINDOWS.md), which also covers
+  installing ROS 2 on Windows via pixi — far less painful than the official route.
+- **x86-64 only.** No ARM has been tried, on any platform.
 
 ---
 
