@@ -53,6 +53,9 @@ namespace SeaNav.Ros2
         private readonly RclInterop.Client[] _client = new RclInterop.Client[1];
         private GCHandle _pin;
 
+        /// <summary>Address of the native rcl handle, for a wait set. Pinned above.</summary>
+        internal IntPtr NativeHandle => _pin.AddrOfPinnedObject();
+
         private readonly IntPtr _requestTypeSupport;
         private readonly IntPtr _responseTypeSupport;
         private readonly IntPtr _nativeRequest;
@@ -160,7 +163,7 @@ namespace SeaNav.Ros2
         /// <remarks>
         /// Polling rather than blocking on a wait set, for the same reason the
         /// subscription polls: a simulator already has a loop. If you need to
-        /// block properly, rcl_wait is the answer and it is not wired up here.
+        /// block properly, put the client or service in a Ros2WaitSet.
         /// </remarks>
         /// <returns>The reply, or null if nothing came back in time.</returns>
         public byte[] CallAndWait(byte[] requestCdr, double timeoutSeconds = 5.0)
@@ -264,6 +267,9 @@ namespace SeaNav.Ros2
         private readonly Ros2Node _node;
         private readonly RclInterop.Service[] _service = new RclInterop.Service[1];
         private GCHandle _pin;
+
+        /// <summary>Address of the native rcl handle, for a wait set. Pinned above.</summary>
+        internal IntPtr NativeHandle => _pin.AddrOfPinnedObject();
 
         private readonly IntPtr _requestTypeSupport;
         private readonly IntPtr _responseTypeSupport;

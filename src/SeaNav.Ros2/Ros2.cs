@@ -517,9 +517,9 @@ namespace SeaNav.Ros2
     /// running at a fixed rate and want to read commands once per step.
     ///
     /// The cost is that a tight loop calling TryTake() with nothing to read will
-    /// spin the CPU. If you ever need to block until a message arrives, that is
-    /// what rcl's wait sets are for - rcl_wait_set_init and friends. Not wired up
-    /// here yet, because nothing in SEANAV needs it.
+    /// spin the CPU. To block until something arrives instead, put this
+    /// subscription in a <see cref="Ros2WaitSet"/>, which sleeps until the
+    /// middleware wakes it.
     /// </remarks>
     public sealed class Ros2Subscription : IDisposable
     {
@@ -537,6 +537,16 @@ namespace SeaNav.Ros2
 
         /// <summary>How many messages TryTake has handed back so far.</summary>
         public long Received { get; private set; }
+
+        /// <summary>
+        /// Address of the native rcl_subscription_t, for handing to a wait set.
+        /// </summary>
+        /// <remarks>
+        /// Safe to keep only because the array is pinned for the life of this
+        /// object - see the GCHandle above. An unpinned address would be a bug
+        /// that appears under memory pressure and nowhere else.
+        /// </remarks>
+        internal IntPtr NativeHandle => _subscriptionPin.AddrOfPinnedObject();
 
         internal Ros2Subscription(Ros2Node node, string messageType, string topic, QosProfile qos)
         {

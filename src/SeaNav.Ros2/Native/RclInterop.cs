@@ -230,10 +230,70 @@ namespace SeaNav.Ros2.Native
         // =====================================================================
         // Function signatures
         // =====================================================================
+        /// <summary>
+        /// rcl_wait_set_t. Measured at 104 bytes on Linux x86-64.
+        /// </summary>
+        /// <remarks>
+        /// Thirteen pointer-sized fields, alternating array and count. Measured
+        /// with a C program against the installed headers rather than counted by
+        /// eye, because getting a struct size wrong here does not fail loudly -
+        /// it corrupts whatever sits after it. That has already cost this project
+        /// a day once, when a fieldless [StructLayout(Size=8)] changed how the
+        /// ABI returned the struct and rcl quietly received garbage.
+        ///
+        /// Only the array pointers are named. The counts are ours already, and
+        /// re-reading them from rcl would only invite the two to disagree.
+        /// </remarks>
+        [StructLayout(LayoutKind.Sequential)]
+        public struct WaitSet
+        {
+            public IntPtr Subscriptions;
+            public IntPtr SizeOfSubscriptions;
+            public IntPtr GuardConditions;
+            public IntPtr SizeOfGuardConditions;
+            public IntPtr Timers;
+            public IntPtr SizeOfTimers;
+            public IntPtr Clients;
+            public IntPtr SizeOfClients;
+            public IntPtr Services;
+            public IntPtr SizeOfServices;
+            public IntPtr Events;
+            public IntPtr SizeOfEvents;
+
+            /// <summary>Null until rcl_wait_set_init succeeds - our "is it live?" test.</summary>
+            public IntPtr Impl;
+        }
+
+        /// <summary>rcl_wait timed out. Expected, not an error.</summary>
+        public const int Timeout = 2;
+
         // One delegate per C function we call. The names match the C names so
         // you can look them up in the ROS documentation without translating.
 
         public delegate Allocator GetDefaultAllocatorFn();
+
+        public delegate WaitSet GetZeroInitializedWaitSetFn();
+
+        // size_t is UIntPtr, so this stays right on 32-bit as well as 64.
+        public delegate int WaitSetInitFn(ref WaitSet waitSet,
+                                          UIntPtr numberOfSubscriptions,
+                                          UIntPtr numberOfGuardConditions,
+                                          UIntPtr numberOfTimers,
+                                          UIntPtr numberOfClients,
+                                          UIntPtr numberOfServices,
+                                          UIntPtr numberOfEvents,
+                                          ref Context context,
+                                          Allocator allocator);
+
+        public delegate int WaitSetFiniFn(ref WaitSet waitSet);
+        public delegate int WaitSetClearFn(ref WaitSet waitSet);
+
+        // add_subscription, add_client and add_service have the same shape, so
+        // one delegate covers all three.
+        public delegate int WaitSetAddFn(ref WaitSet waitSet, IntPtr thing, out UIntPtr index);
+
+        // Timeout is nanoseconds; negative blocks forever.
+        public delegate int WaitFn(ref WaitSet waitSet, long timeoutNanoseconds);
 
         public delegate Context GetZeroInitializedContextFn();
         public delegate InitOptions GetZeroInitializedInitOptionsFn();
