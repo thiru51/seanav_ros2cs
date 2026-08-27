@@ -14,12 +14,18 @@
     <NoWarn>1591;1574</NoWarn>
   </PropertyGroup>
 
-  <!-- The CDR encoder lives in SEANAV's engine-free core, which is also where its
-       harness runs. Linked rather than copied so there is exactly one source of
-       truth; see README, "Where the CDR layer lives". -->
-  <ItemGroup Condition="'$(SeaNavCore)' != ''">
-    <Compile Include="$(SeaNavCore)/Ros/Cdr.cs" Link="Cdr/Cdr.cs" />
-    <Compile Include="$(SeaNavCore)/Ros/RosMessages.cs" Link="Cdr/RosMessages.cs" />
-  </ItemGroup>
+  <!-- Deliberately no reference to SEANAV's CDR encoder.
+
+       This library only ever deals in byte[] - you hand Publish() the encoded
+       bytes and TryTake() hands them back. It does not need to know what a
+       message is, and keeping it that way matters for Unity.
+
+       An earlier version compiled SEANAV's Cdr.cs and RosMessages.cs into this
+       assembly so the examples could use them. Inside Unity that was a disaster:
+       Unity compiles those same files from Assets/SEANAV/Core/Runtime/Ros, so
+       every message type existed twice and the editor filled with CS0433
+       "the type exists in both" errors.
+
+       The examples pull the CDR sources in themselves instead. -->
 
 </Project>

@@ -8,4 +8,11 @@
   <ItemGroup>
     <ProjectReference Include="../../src/SeaNav.Ros2/SeaNav.Ros2.csproj" />
   </ItemGroup>
+  <!-- The message classes and the CDR encoder. The binding itself does not
+       carry these - see the note in SeaNav.Ros2.csproj - so an example that
+       actually builds a message compiles them in here. -->
+  <ItemGroup Condition="'$(SeaNavCore)' != ''">
+    <Compile Include="$(SeaNavCore)/Ros/Cdr.cs" Link="Cdr/Cdr.cs" />
+    <Compile Include="$(SeaNavCore)/Ros/RosMessages.cs" Link="Cdr/RosMessages.cs" />
+  </ItemGroup>
 </Project>

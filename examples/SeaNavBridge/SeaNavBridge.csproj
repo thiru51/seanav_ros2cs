@@ -11,6 +11,8 @@
   </ItemGroup>
   <!-- The whole SEANAV core, so we can run a real scenario rather than a mock. -->
   <ItemGroup Condition="'$(SeaNavCore)' != ''">
-    <Compile Include="$(SeaNavCore)/**/*.cs" Exclude="$(SeaNavCore)/Ros/Cdr.cs;$(SeaNavCore)/Ros/RosMessages.cs" />
+    <!-- The whole core, CDR included. Nothing is excluded any more: the binding
+         no longer carries the message types, so there is nothing to collide with. -->
+    <Compile Include="$(SeaNavCore)/**/*.cs" />
   </ItemGroup>
 </Project>

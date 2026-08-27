@@ -76,6 +76,8 @@ ros2cs.
 dotnet examples/Talker/bin/Release/net8.0/Talker.dll
 ```
 
+The path to SEANAV is for the *examples*, which build messages. The library itself needs nothing.
+
 Then, in another terminal with ROS sourced:
 
 ```bash
@@ -99,16 +101,28 @@ ROS is sourced, rather than passing quietly.
 The CDR encoder itself has its own 76 checks in SEANAV (`./tools/verify.sh Ros`), including the
 worked byte example from the OMG specification. Those need no ROS at all.
 
-## Where the CDR encoder lives
+## Where the CDR encoder lives, and why it is not in here
 
-The code that turns a message into bytes lives in SEANAV, under
-`unity/Assets/SEANAV/Core/Runtime/Ros/`, and this project compiles those files in by path (see the
-`SeaNavCore` property in the .csproj). One copy, one place to fix bugs, and it stays inside the test
-suite that checks it.
+**This library deals in `byte[]` and nothing else.** You hand `Publish` the encoded bytes;
+`TryTake` hands them back. It has no idea what a message is.
 
-The downside is that you currently need a SEANAV checkout to build this. The alternative would be
-for this repo to own the encoder and for SEANAV to copy it in during setup. Worth deciding on
-purpose rather than drifting into.
+That is not minimalism for its own sake. The encoder and the message classes live in SEANAV, under
+`unity/Assets/SEANAV/Core/Runtime/Ros/`, and **Unity compiles those files itself** from the Assets
+folder. An earlier version of this project compiled them into `SeaNav.Ros2.dll` as well, so the
+examples could use them — and inside the Unity editor every message type then existed twice, once
+from source and once from the DLL:
+
+```
+error CS0433: The type 'IRosMessage' exists in both
+'SeaNav.Core' and 'SeaNav.Ros2'
+```
+
+So the split is deliberate: the binding carries the transport, SEANAV carries the format, and
+neither duplicates the other. The examples in this repo compile the CDR sources in themselves,
+which is why they take a `SeaNavCore` property and the library does not.
+
+If you are using this outside SEANAV, bring your own encoder — anything that produces valid CDR
+will do.
 
 ## Things that will bite you if you port this
 
