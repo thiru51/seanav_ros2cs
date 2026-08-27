@@ -23,7 +23,21 @@ namespace SeaNav.Ros2
     /// </summary>
     public sealed class Ros2Context : IDisposable
     {
-        private RclInterop.Context _context;
+        // Held in a pinned single-element array rather than as a plain field.
+        //
+        // This is not fussiness. rcl_node_init takes a POINTER to the context and
+        // keeps it - every later call goes through that pointer. A struct sitting
+        // in a field of a managed object lives on the GC heap and the collector
+        // is free to move it during a compaction, at which point rcl is holding
+        // an address that means nothing any more.
+        //
+        // The symptom is horrible: everything works, sometimes for a whole run,
+        // until a collection happens at the wrong moment. Then rcl reports
+        // "publisher's context is invalid" - or worse, quietly reads whatever is
+        // at the old address now. Pinning the array stops it moving, for the
+        // lifetime of this object.
+        private readonly RclInterop.Context[] _context = new RclInterop.Context[1];
+        private GCHandle _contextPin;
         private readonly List<Ros2Node> _nodes = new List<Ros2Node>();
         private bool _disposed;
 
@@ -47,13 +61,15 @@ namespace SeaNav.Ros2
             if (!string.IsNullOrEmpty(rosLibraryFolder))
                 NativeLoader.SearchPath = rosLibraryFolder;
 
+            _contextPin = GCHandle.Alloc(_context, GCHandleType.Pinned);
+
             Allocator = RclInterop.UtilsFn<RclInterop.GetDefaultAllocatorFn>(
                 "rcutils_get_default_allocator")();
 
             // ROS wants a blank context and a blank options struct, then fills
             // them in. Asking for the blank ones rather than zeroing our own
             // matters: rcl checks for its own sentinel values.
-            _context = RclInterop.Fn<RclInterop.GetZeroInitializedContextFn>(
+            _context[0] = RclInterop.Fn<RclInterop.GetZeroInitializedContextFn>(
                 "rcl_get_zero_initialized_context")();
 
             RclInterop.InitOptions options = RclInterop.Fn<RclInterop.GetZeroInitializedInitOptionsFn>(
@@ -68,7 +84,7 @@ namespace SeaNav.Ros2
                 // argc/argv would let ROS parse command line arguments like
                 // __ns:= remappings. We pass none; add them here if you need them.
                 RclInterop.Check(
-                    RclInterop.Fn<RclInterop.InitFn>("rcl_init")(0, IntPtr.Zero, ref options, ref _context),
+                    RclInterop.Fn<RclInterop.InitFn>("rcl_init")(0, IntPtr.Zero, ref options, ref _context[0]),
                     "Starting ROS 2");
             }
             finally
@@ -88,7 +104,7 @@ namespace SeaNav.Ros2
             get
             {
                 if (_disposed) return false;
-                return RclInterop.Fn<RclInterop.ContextIsValidFn>("rcl_context_is_valid")(ref _context);
+                return RclInterop.Fn<RclInterop.ContextIsValidFn>("rcl_context_is_valid")(ref _context[0]);
             }
         }
 
@@ -107,7 +123,7 @@ namespace SeaNav.Ros2
         }
 
         // Handed to rcl functions that need to write into our context.
-        internal ref RclInterop.Context Handle => ref _context;
+        internal ref RclInterop.Context Handle => ref _context[0];
 
         internal void NodeWasDisposed(Ros2Node node)
         {
@@ -126,8 +142,11 @@ namespace SeaNav.Ros2
                 node.Dispose();
             _nodes.Clear();
 
-            RclInterop.Fn<RclInterop.ShutdownFn>("rcl_shutdown")(ref _context);
-            RclInterop.Fn<RclInterop.ContextFiniFn>("rcl_context_fini")(ref _context);
+            RclInterop.Fn<RclInterop.ShutdownFn>("rcl_shutdown")(ref _context[0]);
+            RclInterop.Fn<RclInterop.ContextFiniFn>("rcl_context_fini")(ref _context[0]);
+
+            // Only release the pin once rcl has finished with the memory.
+            if (_contextPin.IsAllocated) _contextPin.Free();
         }
     }
 
@@ -138,7 +157,11 @@ namespace SeaNav.Ros2
     public sealed class Ros2Node : IDisposable
     {
         private readonly Ros2Context _context;
-        private RclInterop.Node _node;
+
+        // Pinned for the same reason the context is: rcl_publisher_init stores a
+        // pointer to the node and dereferences it on every publish.
+        private readonly RclInterop.Node[] _node = new RclInterop.Node[1];
+        private GCHandle _nodePin;
         private readonly List<IDisposable> _children = new List<IDisposable>();
         private bool _disposed;
 
@@ -154,13 +177,14 @@ namespace SeaNav.Ros2
             Name = name;
             Namespace = nameSpace ?? string.Empty;
 
-            _node = RclInterop.Fn<RclInterop.GetZeroInitializedNodeFn>("rcl_get_zero_initialized_node")();
+            _nodePin = GCHandle.Alloc(_node, GCHandleType.Pinned);
+            _node[0] = RclInterop.Fn<RclInterop.GetZeroInitializedNodeFn>("rcl_get_zero_initialized_node")();
             RclInterop.NodeOptions options =
                 RclInterop.Fn<RclInterop.NodeGetDefaultOptionsFn>("rcl_node_get_default_options")();
 
             RclInterop.Check(
                 RclInterop.Fn<RclInterop.NodeInitFn>("rcl_node_init")(
-                    ref _node, name, Namespace, ref context.Handle, ref options),
+                    ref _node[0], name, Namespace, ref context.Handle, ref options),
                 "Creating node '" + name + "'");
         }
 
@@ -202,7 +226,7 @@ namespace SeaNav.Ros2
             return subscription;
         }
 
-        internal ref RclInterop.Node Handle => ref _node;
+        internal ref RclInterop.Node Handle => ref _node[0];
 
         internal Ros2Context Context => _context;
 
@@ -220,7 +244,8 @@ namespace SeaNav.Ros2
                 child.Dispose();
             _children.Clear();
 
-            RclInterop.Fn<RclInterop.NodeFiniFn>("rcl_node_fini")(ref _node);
+            RclInterop.Fn<RclInterop.NodeFiniFn>("rcl_node_fini")(ref _node[0]);
+            if (_nodePin.IsAllocated) _nodePin.Free();
             _context.NodeWasDisposed(this);
         }
     }
@@ -246,7 +271,8 @@ namespace SeaNav.Ros2
     public sealed class Ros2Publisher : IDisposable
     {
         private readonly Ros2Node _node;
-        private RclInterop.Publisher _publisher;
+        private readonly RclInterop.Publisher[] _publisher = new RclInterop.Publisher[1];
+        private GCHandle _publisherPin;
         private RclInterop.SerializedMessage _message;
 
         // We keep one unmanaged buffer and reuse it. Publishing at 200 Hz should
@@ -256,11 +282,24 @@ namespace SeaNav.Ros2
 
         private bool _disposed;
 
+        // Set once ROS has shut down under us, so we stop trying rather than
+        // throwing the same exception on every subsequent call.
+        private bool _shutDown;
+
         /// <summary>The message type, e.g. "sensor_msgs/msg/Imu".</summary>
         public string MessageType { get; }
 
         /// <summary>The topic name, as you gave it.</summary>
         public string Topic { get; }
+
+        /// <summary>How many messages have actually gone out.</summary>
+        public long Published { get; private set; }
+
+        /// <summary>
+        /// True once ROS shut down underneath this publisher - normally because
+        /// someone pressed Ctrl+C. Publishing after that does nothing.
+        /// </summary>
+        public bool ShutDown { get { return _shutDown; } }
 
         internal Ros2Publisher(Ros2Node node, string messageType, string topic, QosProfile qos)
         {
@@ -270,7 +309,8 @@ namespace SeaNav.Ros2
 
             IntPtr typeSupport = RclInterop.MessageTypeSupport(messageType);
 
-            _publisher = RclInterop.Fn<RclInterop.GetZeroInitializedPublisherFn>(
+            _publisherPin = GCHandle.Alloc(_publisher, GCHandleType.Pinned);
+            _publisher[0] = RclInterop.Fn<RclInterop.GetZeroInitializedPublisherFn>(
                 "rcl_get_zero_initialized_publisher")();
 
             RclInterop.PublisherOptions options =
@@ -282,7 +322,7 @@ namespace SeaNav.Ros2
 
             RclInterop.Check(
                 RclInterop.Fn<RclInterop.PublisherInitFn>("rcl_publisher_init")(
-                    ref _publisher, ref node.Handle, typeSupport, topic, ref options),
+                    ref _publisher[0], ref node.Handle, typeSupport, topic, ref options),
                 "Creating publisher on '" + topic + "' for " + messageType);
 
             _message = new RclInterop.SerializedMessage { Allocator = node.Context.Allocator };
@@ -314,14 +354,37 @@ namespace SeaNav.Ros2
                     "A CDR message is at least 4 bytes - that's the encapsulation header on its own.");
             }
 
+            if (_shutDown) return;
+
             MakeRoomFor(length);
             Marshal.Copy(cdrBytes, 0, _buffer, length);
             _message.Length = (UIntPtr)length;
 
-            RclInterop.Check(
-                RclInterop.Fn<RclInterop.PublishSerializedFn>("rcl_publish_serialized_message")(
-                    ref _publisher, ref _message, IntPtr.Zero),
-                "Publishing on '" + Topic + "'");
+            int result = RclInterop.Fn<RclInterop.PublishSerializedFn>("rcl_publish_serialized_message")(
+                ref _publisher[0], ref _message, IntPtr.Zero);
+
+            if (result == 0)
+            {
+                Published++;
+                return;
+            }
+
+            // Ctrl+C is not a failure. ROS installs its own signal handler when
+            // you call rcl_init, and it shuts the context down underneath you -
+            // so a publish already in flight comes back saying the publisher is
+            // invalid. Throwing there means a perfectly ordinary Ctrl+C ends in
+            // an unhandled exception and a core dump, which is a rotten way to
+            // stop a simulator.
+            //
+            // Anything else really is a failure and still throws.
+            if (!_node.Context.Ok)
+            {
+                _shutDown = true;
+                RclInterop.ClearError();
+                return;
+            }
+
+            RclInterop.Check(result, "Publishing on '" + Topic + "'");
         }
 
         // Grows the unmanaged buffer by doubling, so repeated publishing settles
@@ -350,7 +413,9 @@ namespace SeaNav.Ros2
             if (_disposed) return;
             _disposed = true;
 
-            RclInterop.Fn<RclInterop.PublisherFiniFn>("rcl_publisher_fini")(ref _publisher, ref _node.Handle);
+            RclInterop.Fn<RclInterop.PublisherFiniFn>("rcl_publisher_fini")(
+                ref _publisher[0], ref _node.Handle);
+            if (_publisherPin.IsAllocated) _publisherPin.Free();
 
             if (_buffer != IntPtr.Zero)
             {
@@ -378,7 +443,8 @@ namespace SeaNav.Ros2
     public sealed class Ros2Subscription : IDisposable
     {
         private readonly Ros2Node _node;
-        private RclInterop.Subscription _subscription;
+        private readonly RclInterop.Subscription[] _subscription = new RclInterop.Subscription[1];
+        private GCHandle _subscriptionPin;
         private RclInterop.SerializedMessage _incoming;
         private bool _disposed;
 
@@ -399,7 +465,8 @@ namespace SeaNav.Ros2
 
             IntPtr typeSupport = RclInterop.MessageTypeSupport(messageType);
 
-            _subscription = RclInterop.Fn<RclInterop.GetZeroInitializedSubscriptionFn>(
+            _subscriptionPin = GCHandle.Alloc(_subscription, GCHandleType.Pinned);
+            _subscription[0] = RclInterop.Fn<RclInterop.GetZeroInitializedSubscriptionFn>(
                 "rcl_get_zero_initialized_subscription")();
 
             RclInterop.SubscriptionOptions options =
@@ -411,7 +478,7 @@ namespace SeaNav.Ros2
 
             RclInterop.Check(
                 RclInterop.Fn<RclInterop.SubscriptionInitFn>("rcl_subscription_init")(
-                    ref _subscription, ref node.Handle, typeSupport, topic, ref options),
+                    ref _subscription[0], ref node.Handle, typeSupport, topic, ref options),
                 "Subscribing to '" + topic + "' for " + messageType);
 
             // rcl fills this buffer in for us and will grow it through the
@@ -439,7 +506,7 @@ namespace SeaNav.Ros2
             cdrBytes = null;
 
             int result = RclInterop.Fn<RclInterop.TakeSerializedFn>("rcl_take_serialized_message")(
-                ref _subscription, ref _incoming, IntPtr.Zero, IntPtr.Zero);
+                ref _subscription[0], ref _incoming, IntPtr.Zero, IntPtr.Zero);
 
             // 401 just means the queue was empty. Anything else is a real problem.
             if (result == RclInterop.SubscriptionTakeFailed)
@@ -466,7 +533,8 @@ namespace SeaNav.Ros2
             _disposed = true;
 
             RclInterop.Fn<RclInterop.SubscriptionFiniFn>("rcl_subscription_fini")(
-                ref _subscription, ref _node.Handle);
+                ref _subscription[0], ref _node.Handle);
+            if (_subscriptionPin.IsAllocated) _subscriptionPin.Free();
 
             RclInterop.UtilsFn<RclInterop.Uint8ArrayFiniFn>("rcutils_uint8_array_fini")(ref _incoming);
 

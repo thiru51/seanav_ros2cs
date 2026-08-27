@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <AssemblyName>SeaNavBridge</AssemblyName>
+    <NoWarn>1591;1574</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/SeaNav.Ros2/SeaNav.Ros2.csproj" />
+  </ItemGroup>
+  <!-- The whole SEANAV core, so we can run a real scenario rather than a mock. -->
+  <ItemGroup Condition="'$(SeaNavCore)' != ''">
+    <Compile Include="$(SeaNavCore)/**/*.cs" Exclude="$(SeaNavCore)/Ros/Cdr.cs;$(SeaNavCore)/Ros/RosMessages.cs" />
+  </ItemGroup>
+</Project>
