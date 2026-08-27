@@ -84,28 +84,138 @@ namespace SeaNav.Ros2.Native
                 if (handle == IntPtr.Zero)
                     handle = Open(fileName);
 
-                if (handle == IntPtr.Zero)
-                {
-                    string wherever = string.IsNullOrEmpty(SearchPath)
-                        ? "the system library path"
-                        : SearchPath + " or the system library path";
-
-                    throw new DllNotFoundException(
-                        "Could not open " + fileName + ". Looked in " + wherever + ".\n\n" +
-                        "SOURCE ROS 2 BEFORE STARTING THIS PROCESS:\n" +
-                        "    source /opt/ros/<distro>/setup.bash\n\n" +
-                        "Setting a library folder gets some of the way and is not enough on its " +
-                        "own. ROS 2 is built without an RPATH and opens libraries by bare name " +
-                        "while it runs, so it needs LD_LIBRARY_PATH - which Linux fixes when a " +
-                        "process starts and nothing can change afterwards.\n" +
-                        "For Unity: launch the editor from a terminal that has sourced ROS, or " +
-                        "add the source line to ~/.profile and log out and back in.\n\n" +
-                        LastError());
-                }
+                if (handle == IntPtr.Zero) throw NotFound(fileName);
 
                 Opened[name] = handle;
                 return handle;
             }
+        }
+
+        /// <summary>
+        /// Builds the exception for a library we could not open, with advice
+        /// that matches the platform the reader is actually on.
+        /// </summary>
+        /// <remarks>
+        /// This used to print the Linux advice on both platforms, which sent
+        /// Windows users looking for a setup.bash that does not exist there.
+        /// </remarks>
+        private static DllNotFoundException NotFound(string fileName)
+        {
+            string wherever = string.IsNullOrEmpty(SearchPath)
+                ? "the system library path"
+                : SearchPath + " or the system library path";
+
+            string advice;
+            if (IsWindows)
+            {
+                advice =
+                    "SET THE LIBRARY FOLDER, or start this process from a ROS shell.\n\n" +
+                    "The folder wanted is the one containing rcl.dll:\n" +
+                    "    RoboStack / conda   <env>\\Library\\bin\n" +
+                    "    ROS 2 binary zip    C:\\dev\\ros2_jazzy\\bin\n\n" +
+                    "Windows searches PATH for a DLL's dependencies, and a program started " +
+                    "from an icon never inherited the ROS PATH. Naming the folder lets us hand " +
+                    "it to the loader directly, which works either way.\n\n" +
+                    "If you have no ROS on this machine yet, the least painful route is pixi:\n" +
+                    "    winget install prefix-dev.pixi\n" +
+                    "    pixi init ros_ws --channel https://prefix.dev/robostack-jazzy\n" +
+                    "    cd ros_ws && pixi add ros-jazzy-desktop\n";
+            }
+            else
+            {
+                advice =
+                    "SOURCE ROS 2 BEFORE STARTING THIS PROCESS:\n" +
+                    "    source /opt/ros/<distro>/setup.bash\n\n" +
+                    "Setting a library folder gets some of the way and is not enough on its " +
+                    "own. ROS 2 is built without an RPATH and opens libraries by bare name " +
+                    "while it runs, so it needs LD_LIBRARY_PATH - which Linux fixes when a " +
+                    "process starts and nothing can change afterwards.\n" +
+                    "For Unity: launch the editor from a terminal that has sourced ROS, or " +
+                    "add the source line to ~/.profile and log out and back in.\n";
+            }
+
+            string guess = FindRosLibraryFolder();
+            if (!string.IsNullOrEmpty(guess) && !string.Equals(guess, SearchPath,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                advice += "\nA ROS install appears to be at:\n    " + guess +
+                          "\nTry setting the library folder to that.\n";
+            }
+
+            return new DllNotFoundException(
+                "Could not open " + fileName + ". Looked in " + wherever + ".\n\n" +
+                advice + "\n" + LastError());
+        }
+
+        /// <summary>
+        /// Makes a reasonable guess at where ROS 2's libraries are on this
+        /// machine, so a user does not have to type a path they may not know.
+        /// </summary>
+        /// <remarks>
+        /// A guess, and treated as one - it is used to improve an error message
+        /// and as an optional convenience, never silently instead of what the
+        /// caller asked for. Returns null when nothing plausible is found.
+        ///
+        /// The order matters: an activated environment is checked before any
+        /// fixed location, because someone who has activated one means it.
+        /// </remarks>
+        public static string FindRosLibraryFolder()
+        {
+            var candidates = new List<string>();
+
+            // An active conda / RoboStack / pixi environment. On Windows conda
+            // puts DLLs under Library\bin; on Linux and macOS in lib.
+            string conda = Environment.GetEnvironmentVariable("CONDA_PREFIX");
+            if (!string.IsNullOrEmpty(conda))
+            {
+                candidates.Add(IsWindows ? Path.Combine(conda, "Library", "bin")
+                                         : Path.Combine(conda, "lib"));
+            }
+
+            // A sourced ROS install names its own prefix.
+            string ament = Environment.GetEnvironmentVariable("AMENT_PREFIX_PATH");
+            if (!string.IsNullOrEmpty(ament))
+            {
+                foreach (string prefix in ament.Split(IsWindows ? ';' : ':'))
+                {
+                    if (string.IsNullOrEmpty(prefix)) continue;
+                    candidates.Add(Path.Combine(prefix, IsWindows ? "bin" : "lib"));
+                }
+            }
+
+            string distro = Environment.GetEnvironmentVariable("ROS_DISTRO");
+
+            if (IsWindows)
+            {
+                foreach (string root in new[] { @"C:\dev", @"C:\opt", @"C:\" })
+                {
+                    if (!string.IsNullOrEmpty(distro))
+                        candidates.Add(Path.Combine(root, "ros2_" + distro, "bin"));
+                    candidates.Add(Path.Combine(root, "ros2", "bin"));
+                }
+            }
+            else
+            {
+                if (!string.IsNullOrEmpty(distro))
+                    candidates.Add("/opt/ros/" + distro + "/lib");
+
+                // Newest first, so a machine with two distributions gets the one
+                // most likely to be current rather than whichever sorts first.
+                foreach (string d in new[] { "kilted", "jazzy", "iron", "humble" })
+                    candidates.Add("/opt/ros/" + d + "/lib");
+            }
+
+            string wanted = IsWindows ? "rcl.dll" : "librcl.so";
+            foreach (string folder in candidates)
+            {
+                try
+                {
+                    if (File.Exists(Path.Combine(folder, wanted))) return folder;
+                }
+                catch { /* an unreadable candidate is simply not the answer */ }
+            }
+
+            return null;
         }
 
         /// <summary>
@@ -190,7 +300,131 @@ namespace SeaNav.Ros2.Native
 
         private static IntPtr Open(string path)
         {
-            return IsWindows ? LoadLibrary(path) : dlopen(path, RTLD_NOW | RTLD_GLOBAL);
+            return IsWindows ? OpenWindows(path) : dlopen(path, RTLD_NOW | RTLD_GLOBAL);
+        }
+
+        /// <summary>
+        /// Opens a DLL on Windows, telling the loader to resolve the DLL's own
+        /// dependencies from the folder it came from and from SearchPath.
+        /// </summary>
+        /// <remarks>
+        /// Windows has the problem Linux has - ROS's DLLs depend on each other by
+        /// bare name, and the loader normally looks along PATH, which a
+        /// double-clicked game never had - but unlike Linux it has a built-in
+        /// answer, so we do not need the dlerror recursion here.
+        ///
+        /// Two flags do the work, and the documentation is explicit that both
+        /// cover DEPENDENCIES and not merely the named file:
+        ///
+        ///   LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR  the folder holding this DLL is
+        ///       searched for its dependencies. Requires a full path, which is
+        ///       why the caller must not pass a bare file name with this flag.
+        ///
+        ///   LOAD_LIBRARY_SEARCH_DEFAULT_DIRS  the application folder, System32,
+        ///       and anything handed to AddDllDirectory.
+        ///
+        /// AddDllDirectory is what makes SearchPath mean something. Note we do
+        /// NOT call SetDefaultDllDirectories: without it, directories added this
+        /// way are used only by LoadLibraryEx calls that ask for them, so the
+        /// process-wide search order is left alone. That matters inside Unity,
+        /// which loads plenty of native plugins of its own and would be within
+        /// its rights to break if we quietly changed the rules underneath it.
+        ///
+        /// These flags need KB2533623 on Windows 7 and are simply present from
+        /// Windows 8 on. The documented way to test for them is to look up
+        /// AddDllDirectory itself, which is what Ready() does; if it is missing
+        /// we fall back to the old altered-search-path behaviour, which cannot be
+        /// combined with any LOAD_LIBRARY_SEARCH flag.
+        /// </remarks>
+        private static IntPtr OpenWindows(string path)
+        {
+            bool rooted = Path.IsPathRooted(path);
+
+            if (WindowsSearchFlagsAvailable)
+            {
+                RegisterWindowsSearchPath();
+
+                int flags = LOAD_LIBRARY_SEARCH_DEFAULT_DIRS;
+                if (rooted) flags |= LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR;
+
+                IntPtr handle = LoadLibraryExW(path, IntPtr.Zero, flags);
+                if (handle != IntPtr.Zero) return handle;
+
+                // A bare name may still be resolvable the ordinary way - for
+                // instance when the process really was started from a ROS shell
+                // and PATH is already correct.
+                if (!rooted) return LoadLibraryExW(path, IntPtr.Zero, 0);
+                return IntPtr.Zero;
+            }
+
+            return LoadLibraryExW(path, IntPtr.Zero,
+                                  rooted ? LOAD_WITH_ALTERED_SEARCH_PATH : 0);
+        }
+
+        private static bool? _windowsSearchFlags;
+
+        /// <summary>
+        /// True when this Windows supports the LOAD_LIBRARY_SEARCH_* flags.
+        /// </summary>
+        /// <remarks>
+        /// Probed the way Microsoft documents it: look up AddDllDirectory in
+        /// kernel32. If it resolves, the flags work.
+        /// </remarks>
+        private static bool WindowsSearchFlagsAvailable
+        {
+            get
+            {
+                if (_windowsSearchFlags.HasValue) return _windowsSearchFlags.Value;
+
+                bool ok = false;
+                try
+                {
+                    IntPtr kernel32 = GetModuleHandleW("kernel32.dll");
+                    ok = kernel32 != IntPtr.Zero &&
+                         GetProcAddress(kernel32, "AddDllDirectory") != IntPtr.Zero;
+                }
+                catch { ok = false; }
+
+                _windowsSearchFlags = ok;
+                return ok;
+            }
+        }
+
+        private static string _registeredSearchPath;
+
+        /// <summary>
+        /// Hands SearchPath to the Windows loader, once, and only if it changed.
+        /// </summary>
+        /// <remarks>
+        /// Also registers the sibling "lib" folder. A conda or RoboStack install
+        /// puts the DLLs in Library\bin but leaves some support files under
+        /// Library\lib, and a user who points us at either one should not have to
+        /// know which.
+        /// </remarks>
+        private static void RegisterWindowsSearchPath()
+        {
+            string path = SearchPath;
+            if (string.IsNullOrEmpty(path)) return;
+            if (string.Equals(path, _registeredSearchPath, StringComparison.OrdinalIgnoreCase))
+                return;
+
+            _registeredSearchPath = path;
+
+            try
+            {
+                AddDllDirectory(Path.GetFullPath(path));
+
+                string parent = Path.GetDirectoryName(Path.GetFullPath(path));
+                if (!string.IsNullOrEmpty(parent))
+                {
+                    foreach (string sibling in new[] { "bin", "lib" })
+                    {
+                        string folder = Path.Combine(parent, sibling);
+                        if (Directory.Exists(folder)) AddDllDirectory(folder);
+                    }
+                }
+            }
+            catch { /* the load below will report the real problem */ }
         }
 
         /// <summary>
@@ -223,6 +457,12 @@ namespace SeaNav.Ros2.Native
         /// </remarks>
         private static IntPtr OpenWithDependencies(string path, int depth)
         {
+            // On Windows the loader resolves dependencies for us once it is told
+            // where to look - see OpenWindows. Recursing here would be pointless
+            // anyway: LoadLibraryEx reports "module not found" without naming the
+            // dependency it wanted, so there is nothing to recurse ON.
+            if (IsWindows) return Open(path);
+
             // A library needing more than this many levels is not a library we
             // want to be loading, and the guard stops a cycle spinning forever.
             if (depth > 32) return IntPtr.Zero;
@@ -283,11 +523,53 @@ namespace SeaNav.Ros2.Native
 
         private static string LastError()
         {
-            if (IsWindows)
-                return "Windows error code: " + Marshal.GetLastWin32Error();
+            if (IsWindows) return WindowsError(Marshal.GetLastWin32Error());
 
             IntPtr message = dlerror();
             return message == IntPtr.Zero ? "" : "dlerror says: " + Marshal.PtrToStringAnsi(message);
+        }
+
+        /// <summary>
+        /// Turns a Windows error number into the sentence Windows would print.
+        /// </summary>
+        /// <remarks>
+        /// This used to report the bare number, which for the only failure that
+        /// actually happens here - 126, "the specified module could not be
+        /// found" - told the reader nothing at all. Error 126 is also
+        /// notoriously misleading: it is reported both when the DLL itself is
+        /// missing AND when the DLL was found but one of its dependencies was
+        /// not, so the extra sentence is added below.
+        /// </remarks>
+        private static string WindowsError(int code)
+        {
+            string text = null;
+            try
+            {
+                var buffer = new System.Text.StringBuilder(1024);
+                int written = FormatMessageW(
+                    FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                    IntPtr.Zero, code, 0, buffer, buffer.Capacity, IntPtr.Zero);
+                if (written > 0) text = buffer.ToString().Trim();
+            }
+            catch { /* fall through to the bare number */ }
+
+            string result = "Windows error " + code +
+                            (string.IsNullOrEmpty(text) ? "" : ": " + text);
+
+            if (code == ERROR_MOD_NOT_FOUND)
+            {
+                result += "\n\nError 126 means the DLL itself was missing OR one of the DLLs " +
+                          "it depends on was. Windows does not say which, so check that the " +
+                          "library folder is the one holding rcl.dll - for a conda or RoboStack " +
+                          "install that is <env>\\Library\\bin, not <env>\\lib.";
+            }
+            else if (code == ERROR_BAD_EXE_FORMAT)
+            {
+                result += "\n\nError 193 almost always means a 32-bit / 64-bit mismatch. " +
+                          "ROS 2 is 64-bit, so the process loading it must be too.";
+            }
+
+            return result;
         }
 
         // RTLD_NOW  = resolve everything immediately, so we fail here rather than
@@ -316,9 +598,38 @@ namespace SeaNav.Ros2.Native
         [DllImport("libc")]
         private static extern IntPtr getenv(string name);
 
-        [DllImport("kernel32", SetLastError = true, CharSet = CharSet.Ansi)]
-        private static extern IntPtr LoadLibrary(string path);
+        // Search flags, from libloaderapi.h. DEFAULT_DIRS is itself the union of
+        // APPLICATION_DIR, SYSTEM32 and USER_DIRS, so registering a folder with
+        // AddDllDirectory is enough to have it searched.
+        private const int LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR = 0x00000100;
+        private const int LOAD_LIBRARY_SEARCH_DEFAULT_DIRS = 0x00001000;
+        private const int LOAD_WITH_ALTERED_SEARCH_PATH    = 0x00000008;
 
+        private const int ERROR_MOD_NOT_FOUND  = 126;
+        private const int ERROR_BAD_EXE_FORMAT = 193;
+
+        private const int FORMAT_MESSAGE_FROM_SYSTEM    = 0x00001000;
+        private const int FORMAT_MESSAGE_IGNORE_INSERTS = 0x00000200;
+
+        // Unicode throughout. The ANSI entry point cannot express a path
+        // containing characters outside the system code page, and ROS on Windows
+        // usually lives under C:\Users\<name>, where the name is whatever the
+        // person is actually called.
+        [DllImport("kernel32", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern IntPtr LoadLibraryExW(string path, IntPtr reserved, int flags);
+
+        [DllImport("kernel32", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern IntPtr AddDllDirectory(string directory);
+
+        [DllImport("kernel32", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern IntPtr GetModuleHandleW(string name);
+
+        [DllImport("kernel32", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern int FormatMessageW(int flags, IntPtr source, int messageId,
+                                                 int languageId, System.Text.StringBuilder buffer,
+                                                 int size, IntPtr arguments);
+
+        // GetProcAddress is ANSI-only by design - symbol names are always ASCII.
         [DllImport("kernel32", SetLastError = true, CharSet = CharSet.Ansi)]
         private static extern IntPtr GetProcAddress(IntPtr module, string name);
     }
