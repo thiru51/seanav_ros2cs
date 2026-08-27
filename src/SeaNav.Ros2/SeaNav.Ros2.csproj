@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- netstandard2.1 so that Unity and .NET load the same assembly. Unity's
+         scripting runtime does not have System.Runtime.InteropServices.NativeLibrary,
+         which is why Native/NativeLoader.cs does its own dlopen/LoadLibrary. -->
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <LangVersion>8.0</LangVersion>
+    <AssemblyName>SeaNav.Ros2</AssemblyName>
+    <RootNamespace>SeaNav.Ros2</RootNamespace>
+    <Nullable>disable</Nullable>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+    <NoWarn>1591;1574</NoWarn>
+  </PropertyGroup>
+
+  <!-- The CDR encoder lives in SEANAV's engine-free core, which is also where its
+       harness runs. Linked rather than copied so there is exactly one source of
+       truth; see README, "Where the CDR layer lives". -->
+  <ItemGroup Condition="'$(SeaNavCore)' != ''">
+    <Compile Include="$(SeaNavCore)/Ros/Cdr.cs" Link="Cdr/Cdr.cs" />
+    <Compile Include="$(SeaNavCore)/Ros/RosMessages.cs" Link="Cdr/RosMessages.cs" />
+  </ItemGroup>
+
+</Project>
