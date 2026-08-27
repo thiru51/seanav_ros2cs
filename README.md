@@ -54,7 +54,7 @@ has a headless mode.
 |---|---|
 | Publishing, any message type, any QoS | works |
 | Real nodes visible to `ros2 node list` and `ros2 topic info` | works |
-| Subscribing | proven at the `rcl` level, API not written yet |
+| Subscribing | works — `Ros2Subscription.TryTake` |
 | Services and clients | **not possible this way** |
 
 The services one isn't a to-do item, it's a wall. `rcl` gives you `rcl_send_request` and
@@ -81,6 +81,23 @@ Then, in another terminal with ROS sourced:
 ```bash
 ros2 topic echo /seanav/imu sensor_msgs/msg/Imu
 ```
+
+## Testing it
+
+`tools/interop_test.sh` checks both directions against ROS's own tools, which is the only test
+that really means anything here — talking to yourself proves nothing.
+
+```bash
+source /opt/ros/jazzy/setup.bash
+./tools/interop_test.sh /path/to/SEANAV
+```
+
+Nine checks: our publisher into `ros2 topic echo`, `ros2 topic pub` into our subscriber, and
+`ros2 node list` / `ros2 topic info` seeing us as an ordinary node. It exits 3 and says so if no
+ROS is sourced, rather than passing quietly.
+
+The CDR encoder itself has its own 76 checks in SEANAV (`./tools/verify.sh Ros`), including the
+worked byte example from the OMG specification. Those need no ROS at all.
 
 ## Where the CDR encoder lives
 

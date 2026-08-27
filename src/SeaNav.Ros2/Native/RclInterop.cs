@@ -158,6 +158,30 @@ namespace SeaNav.Ros2.Native
         }
 
         /// <summary>
+        /// rcl_subscription_options_t. Note the size: 160, NOT 152 like the
+        /// publisher options. They look like the same struct and they are not,
+        /// and getting that wrong writes past the end of the buffer rcl handed
+        /// you. Measured, like everything else here.
+        /// </summary>
+        [StructLayout(LayoutKind.Sequential, Size = 160)]
+        public struct SubscriptionOptions
+        {
+            public QosProfileNative Qos;      // bytes 0-87, same place as the publisher
+            public Allocator Allocator;       // bytes 88-127
+        }
+
+        /// <summary>
+        /// rcutils_error_string_t. A fixed 1024-byte buffer, returned by value.
+        /// RCUTILS_ERROR_MESSAGE_MAX_LENGTH in rcutils/error_handling.h.
+        /// </summary>
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi)]
+        public struct ErrorString
+        {
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 1024)]
+            public string Message;
+        }
+
+        /// <summary>
         /// rcutils_uint8_array_t - a plain byte buffer with a length, a capacity
         /// and the allocator that owns it. This is what we hand to ROS when we
         /// publish an already-encoded message.
@@ -209,7 +233,34 @@ namespace SeaNav.Ros2.Native
                                                 ref SerializedMessage message,
                                                 IntPtr allocation);
 
-        public delegate IntPtr GetErrorStringFn();
+        public delegate Subscription GetZeroInitializedSubscriptionFn();
+        public delegate SubscriptionOptions SubscriptionGetDefaultOptionsFn();
+        public delegate int SubscriptionInitFn(ref Subscription subscription,
+                                               ref Node node,
+                                               IntPtr typeSupport,
+                                               [MarshalAs(UnmanagedType.LPStr)] string topic,
+                                               ref SubscriptionOptions options);
+        public delegate int SubscriptionFiniFn(ref Subscription subscription, ref Node node);
+        public delegate int TakeSerializedFn(ref Subscription subscription,
+                                             ref SerializedMessage message,
+                                             IntPtr messageInfo,
+                                             IntPtr allocation);
+
+        // Buffer management for the message rcl fills in when we take one.
+        public delegate int Uint8ArrayInitFn(ref SerializedMessage message,
+                                             UIntPtr capacity,
+                                             ref Allocator allocator);
+        public delegate int Uint8ArrayFiniFn(ref SerializedMessage message);
+
+        // Careful with these two. In the ROS headers, rcl_get_error_string and
+        // rcl_reset_error are #defines pointing at rcutils_get_error_string and
+        // rcutils_reset_error, which live in librcutils, not librcl. Looking
+        // for "rcl_reset_error" as a symbol finds nothing and throws.
+        //
+        // And rcutils_get_error_string does not return a char* - it returns a
+        // struct holding a fixed 1024-byte char array, by value. Declaring it as
+        // IntPtr compiles and gives nonsense.
+        public delegate ErrorString GetErrorStringFn();
         public delegate void ResetErrorFn();
         public delegate IntPtr GetTypeSupportFn();
 
@@ -312,6 +363,12 @@ namespace SeaNav.Ros2.Native
         }
 
         /// <summary>
+        /// What rcl_take_serialized_message returns when the queue is empty.
+        /// Not an error - just "nothing has arrived yet".
+        /// </summary>
+        public const int SubscriptionTakeFailed = 401;
+
+        /// <summary>
         /// Every rcl function returns a number: 0 means it worked. This turns
         /// anything else into an exception, with ROS's own explanation attached.
         /// </summary>
@@ -322,13 +379,11 @@ namespace SeaNav.Ros2.Native
             string rosSays = "";
             try
             {
-                IntPtr text = Fn<GetErrorStringFn>("rcl_get_error_string")();
-                if (text != IntPtr.Zero)
-                    rosSays = "\nROS says: " + Marshal.PtrToStringAnsi(text);
+                ErrorString text = UtilsFn<GetErrorStringFn>("rcutils_get_error_string")();
+                if (!string.IsNullOrEmpty(text.Message))
+                    rosSays = "\nROS says: " + text.Message;
 
-                // rcl keeps one error slot per thread. If we don't clear it, the
-                // next failure shows this stale message instead of its own.
-                Fn<ResetErrorFn>("rcl_reset_error")();
+                ClearError();
             }
             catch
             {
@@ -337,6 +392,16 @@ namespace SeaNav.Ros2.Native
 
             throw new Ros2Exception(
                 whatWeTried + " failed: " + Explain(result) + rosSays, result);
+        }
+
+        /// <summary>
+        /// Clears the error rcl recorded. There is one slot per thread, so if you
+        /// leave a stale message in it the next genuine failure reports the old
+        /// one instead of its own.
+        /// </summary>
+        public static void ClearError()
+        {
+            UtilsFn<ResetErrorFn>("rcutils_reset_error")();
         }
 
         // The return codes you are most likely to hit, in plain words.

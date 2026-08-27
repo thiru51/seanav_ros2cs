@@ -182,6 +182,26 @@ namespace SeaNav.Ros2
             return publisher;
         }
 
+        /// <summary>
+        /// Subscribes to a topic. You get the raw CDR bytes back and decode them
+        /// yourself with CdrReader - same deal as publishing, in reverse.
+        /// </summary>
+        /// <param name="messageType">Full ROS type name, e.g. "geometry_msgs/msg/Twist".</param>
+        /// <param name="topic">Topic to listen on.</param>
+        /// <param name="qos">
+        /// Must be compatible with whoever is publishing. If you subscribe with
+        /// the default (reliable) to a sensor topic published best-effort, you
+        /// will receive absolutely nothing and be told absolutely nothing.
+        /// </param>
+        public Ros2Subscription CreateSubscription(string messageType, string topic, QosProfile qos = null)
+        {
+            if (_disposed) throw new ObjectDisposedException(nameof(Ros2Node));
+
+            Ros2Subscription subscription = new Ros2Subscription(this, messageType, topic, qos);
+            _children.Add(subscription);
+            return subscription;
+        }
+
         internal ref RclInterop.Node Handle => ref _node;
 
         internal Ros2Context Context => _context;
@@ -337,6 +357,118 @@ namespace SeaNav.Ros2
                 Marshal.FreeHGlobal(_buffer);
                 _buffer = IntPtr.Zero;
             }
+
+            _node.ChildWasDisposed(this);
+        }
+    }
+
+    /// <summary>
+    /// Listens on a topic and hands you the raw message bytes.
+    /// </summary>
+    /// <remarks>
+    /// This does not call you back. You ask it whether anything has arrived, and
+    /// it tells you. That suits a simulator, where you already have a loop
+    /// running at a fixed rate and want to read commands once per step.
+    ///
+    /// The cost is that a tight loop calling TryTake() with nothing to read will
+    /// spin the CPU. If you ever need to block until a message arrives, that is
+    /// what rcl's wait sets are for - rcl_wait_set_init and friends. Not wired up
+    /// here yet, because nothing in SEANAV needs it.
+    /// </remarks>
+    public sealed class Ros2Subscription : IDisposable
+    {
+        private readonly Ros2Node _node;
+        private RclInterop.Subscription _subscription;
+        private RclInterop.SerializedMessage _incoming;
+        private bool _disposed;
+
+        /// <summary>The message type we're listening for.</summary>
+        public string MessageType { get; }
+
+        /// <summary>The topic name, as you gave it.</summary>
+        public string Topic { get; }
+
+        /// <summary>How many messages TryTake has handed back so far.</summary>
+        public long Received { get; private set; }
+
+        internal Ros2Subscription(Ros2Node node, string messageType, string topic, QosProfile qos)
+        {
+            _node = node;
+            MessageType = messageType;
+            Topic = topic;
+
+            IntPtr typeSupport = RclInterop.MessageTypeSupport(messageType);
+
+            _subscription = RclInterop.Fn<RclInterop.GetZeroInitializedSubscriptionFn>(
+                "rcl_get_zero_initialized_subscription")();
+
+            RclInterop.SubscriptionOptions options =
+                RclInterop.Fn<RclInterop.SubscriptionGetDefaultOptionsFn>(
+                    "rcl_subscription_get_default_options")();
+
+            if (qos != null)
+                qos.CopyInto(ref options);
+
+            RclInterop.Check(
+                RclInterop.Fn<RclInterop.SubscriptionInitFn>("rcl_subscription_init")(
+                    ref _subscription, ref node.Handle, typeSupport, topic, ref options),
+                "Subscribing to '" + topic + "' for " + messageType);
+
+            // rcl fills this buffer in for us and will grow it through the
+            // allocator if a message doesn't fit, so we let rcutils set it up
+            // rather than handing over memory we allocated ourselves.
+            _incoming = new RclInterop.SerializedMessage();
+            RclInterop.Allocator allocator = node.Context.Allocator;
+            RclInterop.Check(
+                RclInterop.UtilsFn<RclInterop.Uint8ArrayInitFn>("rcutils_uint8_array_init")(
+                    ref _incoming, (UIntPtr)1024, ref allocator),
+                "Allocating the receive buffer");
+        }
+
+        /// <summary>
+        /// Checks for a message. Returns false straight away if nothing is waiting.
+        /// </summary>
+        /// <param name="cdrBytes">
+        /// The message as it came off the wire, ready for CdrReader. Only valid
+        /// when this returns true.
+        /// </param>
+        public bool TryTake(out byte[] cdrBytes)
+        {
+            if (_disposed) throw new ObjectDisposedException(nameof(Ros2Subscription));
+
+            cdrBytes = null;
+
+            int result = RclInterop.Fn<RclInterop.TakeSerializedFn>("rcl_take_serialized_message")(
+                ref _subscription, ref _incoming, IntPtr.Zero, IntPtr.Zero);
+
+            // 401 just means the queue was empty. Anything else is a real problem.
+            if (result == RclInterop.SubscriptionTakeFailed)
+            {
+                // rcl records an error string even for this, and if we leave it
+                // there the next genuine failure reports this stale message instead.
+                RclInterop.ClearError();
+                return false;
+            }
+
+            RclInterop.Check(result, "Taking a message from '" + Topic + "'");
+
+            int length = (int)_incoming.Length;
+            cdrBytes = new byte[length];
+            Marshal.Copy(_incoming.Buffer, cdrBytes, 0, length);
+
+            Received++;
+            return true;
+        }
+
+        public void Dispose()
+        {
+            if (_disposed) return;
+            _disposed = true;
+
+            RclInterop.Fn<RclInterop.SubscriptionFiniFn>("rcl_subscription_fini")(
+                ref _subscription, ref _node.Handle);
+
+            RclInterop.UtilsFn<RclInterop.Uint8ArrayFiniFn>("rcutils_uint8_array_fini")(ref _incoming);
 
             _node.ChildWasDisposed(this);
         }

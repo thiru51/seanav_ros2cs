@@ -148,14 +148,37 @@ namespace SeaNav.Ros2
         /// </remarks>
         internal void CopyInto(ref RclInterop.PublisherOptions options)
         {
+            Guard();
+            Overwrite(ref options.Qos);
+        }
+
+        /// <summary>Same again for a subscription. Different struct, same 88 bytes of QoS at the front.</summary>
+        internal void CopyInto(ref RclInterop.SubscriptionOptions options)
+        {
+            Guard();
+            Overwrite(ref options.Qos);
+        }
+
+        private void Guard()
+        {
             if (Depth < 0)
                 throw new ArgumentOutOfRangeException(nameof(Depth), "Queue depth can't be negative.");
+        }
 
-            options.Qos.History = (int)History;
-            options.Qos.Depth = (UIntPtr)Depth;
-            options.Qos.Reliability = (int)Reliability;
-            options.Qos.Durability = (int)Durability;
-            options.Qos.Liveliness = (int)Liveliness;
+        // Note that this changes fields one at a time on the struct rcl gave us,
+        // rather than replacing the whole thing with a fresh one. That is
+        // deliberate and it matters: a new struct would have zeros in the
+        // deadline, lifespan and lease fields, wiping out the "unspecified"
+        // marker rcl had put there. Zero does not mean "no limit" in DDS - it
+        // means "a limit of zero" - and the result is a publisher that quietly
+        // fails to match anything.
+        private void Overwrite(ref RclInterop.QosProfileNative qos)
+        {
+            qos.History = (int)History;
+            qos.Depth = (UIntPtr)Depth;
+            qos.Reliability = (int)Reliability;
+            qos.Durability = (int)Durability;
+            qos.Liveliness = (int)Liveliness;
         }
 
         public override string ToString()
