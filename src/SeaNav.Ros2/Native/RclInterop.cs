@@ -546,10 +546,21 @@ namespace SeaNav.Ros2.Native
             if (string.IsNullOrEmpty(typeName)) throw new ArgumentNullException(nameof(typeName));
 
             string[] parts = typeName.Split('/');
-            if (parts.Length != 3 || parts[1] != expectedKind)
+
+            // An action's two services are named package/action/Name_SendGoal
+            // and package/action/Name_GetResult, not package/srv/... - they are
+            // generated from the .action file and live in its namespace. Their
+            // symbols follow the same pattern with "action" in the middle, so
+            // the only thing that has to change here is what we will accept.
+            bool kindOk = parts.Length == 3 &&
+                          (parts[1] == expectedKind ||
+                           (expectedKind == "srv" && parts[1] == "action"));
+
+            if (!kindOk)
                 throw new ArgumentException(
-                    "expected <package>/" + expectedKind + "/<Name>, got: " + typeName,
-                    nameof(typeName));
+                    "expected <package>/" + expectedKind + "/<Name>" +
+                    (expectedKind == "srv" ? " or <package>/action/<Name>" : "") +
+                    ", got: " + typeName, nameof(typeName));
             return parts;
         }
 
