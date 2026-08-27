@@ -584,7 +584,14 @@ claiming support for anything else.
 - **No QoS events.** Deadline missed, liveliness lost and incompatible-QoS notifications are not
   surfaced. They are the honest way to detect a publisher that has gone quiet, as opposed to one
   with nothing to say.
-- **Linux x86-64 only** in practice. The Windows paths exist in the loader and are untested.
+- **Linux x86-64 only on this branch.** The Windows code here is the original stub and does not
+  work: it recovers from a missing dependency by reading `dlerror`, which Windows does not provide,
+  so the recovery silently does nothing on the one platform that most needs it.
+  **The fix lives on the [`windows`](../../tree/windows) branch** — the documented Win32 loader
+  mechanism, plus a guide to installing ROS 2 on Windows via pixi. It is kept separate because it
+  has not been run on a Windows machine, and merging unrun code here would quietly lower what
+  `main` means.
+- **x86-64 only.** No ARM has been tried, on any platform.
 
 ---
 
