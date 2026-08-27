@@ -34,6 +34,7 @@ using (var node = ros.CreateNode("my_node"))
 - [Services and clients](#services-and-clients)
 - [Parameters](#parameters)
 - [Actions](#actions)
+- [Waiting instead of polling](#waiting-instead-of-polling)
 - [Quality of Service](#quality-of-service)
 - [Message types](#message-types)
 - [Testing](#testing)
@@ -54,7 +55,7 @@ using (var node = ros.CreateNode("my_node"))
 | Custom message and service types | yes — see [Message types](#message-types) |
 | **Parameters** | **yes** — `ros2 param list/get/set/describe` |
 | **Actions** | **yes** — goals, feedback, cancel, result |
-| Wait sets (blocking instead of polling) | no |
+| **Wait sets — block instead of polling** | **yes** — 0.25% of a core instead of 100% |
 
 Every "yes" above was checked by running the ordinary ROS command-line tools against a node from
 this library. Not by a test that calls our own code — by the same programs a ROS user already has.
@@ -350,6 +351,68 @@ Three edges that are easy to get wrong and are handled here:
 
 ---
 
+## Waiting instead of polling
+
+### The problem
+
+Everything else here **polls**: you call `TryTake`, and it tells you whether anything arrived. That
+suits a simulator, which already runs a loop at a fixed rate and wants commands once per step.
+
+It suits nothing else. A program whose only job is to listen has no natural rate, so it either
+sleeps — adding latency it did not need — or spins, asking "anything yet?" millions of times a
+second and burning a whole CPU core to hear nothing.
+
+A **wait set** fixes that: hand the middleware everything you care about, and it puts the thread to
+sleep until one of them is ready or your timeout expires.
+
+```csharp
+using (var wait = new Ros2WaitSet(context))
+{
+    wait.Add(subscription);
+    wait.Add(service);
+
+    while (running)
+    {
+        if (!wait.Wait(1.0)) continue;          // nothing arrived in a second
+
+        if (wait.IsReady(subscription)) { /* ... */ }
+        if (wait.IsReady(service))      { /* ... */ }
+    }
+}
+```
+
+### What it costs, measured
+
+The same program for the same eight seconds, changing only how it waits:
+
+| | CPU used | Of one core |
+|---|---|---|
+| **Wait set** | 0.020 s | **0.25%** |
+| Polling | 8.010 s | **100.10%** |
+
+Run it yourself — the polling loop is kept in the demo precisely so this is a measurement rather
+than a claim:
+
+```bash
+dotnet run --project examples/WaitSetDemo -- 8
+dotnet run --project examples/WaitSetDemo -- 8 --poll
+```
+
+### Two things to know
+
+**Add once, wait many times.** The registrations are kept on the C# side and re-applied on every
+`Wait`. That is not a skipped optimisation — `rcl_wait` *prunes* the set it is given, overwriting
+every entry that was not ready with null, so a set is single-use. Doing the refill for you removes
+the most common way this API is misused: waiting twice and wondering why the second call never
+reports anything.
+
+**Not on Unity's main thread.** Blocking is the entire point, and blocking the thread that renders
+frames will freeze the editor. In Unity, keep polling on the main thread and use a wait set on a
+background thread or in a headless process. An instance must also not be waited on from two threads
+at once — rcl documents that as undefined behaviour, not as an error you are told about.
+
+---
+
 ## Quality of Service
 
 **Read this bit even if you skip the rest**, because it catches everyone once: if a publisher and a
@@ -448,6 +511,7 @@ actual observed results, not a description of what should happen:
 | `ros2 param list` / `get` / `set` / `describe` | all four work |
 | `ros2 param set` on a read-only parameter | refused, **with our reason shown by the CLI** |
 | `ros2 action send_goal /fibonacci ... --feedback` | feedback streamed, `SUCCEEDED`, `0 1 1 2 3 5 8 13` |
+| `ros2 topic pub` into a wait set | woke on each message; 0.25% of a core while idle |
 
 Run the demos yourself:
 
@@ -455,6 +519,7 @@ Run the demos yourself:
 dotnet run --project examples/ServiceDemo
 dotnet run --project examples/ParameterDemo
 dotnet run --project examples/ActionDemo
+dotnet run --project examples/WaitSetDemo
 ```
 
 Then, in a second terminal with ROS sourced, poke at them with the commands in the table.
@@ -512,15 +577,13 @@ claiming support for anything else.
 
 ## Known limits
 
-- **No wait sets — polling only.** Nothing blocks until a message arrives; `rcl_wait` would be the
-  way and isn't wired up. Fine for a simulator with its own loop, which is already running at a
-  fixed rate; wasteful for an idle listener, which will spin a core doing nothing. Sleep in the
-  loop, as the Listener example does.
-- **Parameter callbacks are not wired.** You are told a parameter changed by reading it; there is
-  no "on change" hook yet. The change topic is published so external tools see it.
-- **No action result expiry.** A finished goal's result is kept for the life of the server rather
-  than discarded after the ROS-conventional timeout. Harmless for a simulator run, a slow leak for
-  a process running for weeks.
+- **No timers or guard conditions in a wait set.** Subscriptions, clients and services can be
+  waited on; `rcl`'s timers and guard conditions are not wired up. A guard condition is the
+  conventional way to wake a wait set early from another thread, so today the way to interrupt one
+  is a short timeout.
+- **No QoS events.** Deadline missed, liveliness lost and incompatible-QoS notifications are not
+  surfaced. They are the honest way to detect a publisher that has gone quiet, as opposed to one
+  with nothing to say.
 - **Linux x86-64 only** in practice. The Windows paths exist in the loader and are untested.
 
 ---
