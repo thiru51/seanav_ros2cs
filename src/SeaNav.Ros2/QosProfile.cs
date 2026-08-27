@@ -159,6 +159,13 @@ namespace SeaNav.Ros2
             Overwrite(ref options.Qos);
         }
 
+        /// <summary>Same again for a client or a service. Their options struct is 128 octets.</summary>
+        internal void CopyInto(ref RclInterop.EndpointOptions128 options)
+        {
+            Guard();
+            Overwrite(ref options.Qos);
+        }
+
         private void Guard()
         {
             if (Depth < 0)

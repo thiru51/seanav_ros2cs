@@ -73,6 +73,38 @@ namespace SeaNav.Ros2.Native
             public IntPtr Impl;
         }
 
+        /// <summary>rcl_client_t. One pointer, like the rest.</summary>
+        [StructLayout(LayoutKind.Sequential)]
+        public struct Client { public IntPtr Impl; }
+
+        /// <summary>rcl_service_t.</summary>
+        [StructLayout(LayoutKind.Sequential)]
+        public struct Service { public IntPtr Impl; }
+
+        /// <summary>
+        /// rcl_client_options_t and rcl_service_options_t, both 128 octets with
+        /// the QoS at the front. Measured, like everything else here - and note
+        /// they are 128, not the publisher's 152 or the subscription's 160.
+        /// </summary>
+        [StructLayout(LayoutKind.Sequential, Size = 128)]
+        public struct EndpointOptions128
+        {
+            public QosProfileNative Qos;
+            public Allocator Allocator;
+        }
+
+        /// <summary>
+        /// rmw_request_id_t - who asked, and which request it was. 24 octets:
+        /// an 16-octet writer GUID and an int64 sequence number.
+        /// </summary>
+        [StructLayout(LayoutKind.Sequential)]
+        public struct RequestId
+        {
+            public long WriterGuidLow;
+            public long WriterGuidHigh;
+            public long SequenceNumber;
+        }
+
         /// <summary>rcl_subscription_t. Same idea as Publisher.</summary>
         [StructLayout(LayoutKind.Sequential)]
         public struct Subscription
@@ -260,6 +292,43 @@ namespace SeaNav.Ros2.Native
         // And rcutils_get_error_string does not return a char* - it returns a
         // struct holding a fixed 1024-byte char array, by value. Declaring it as
         // IntPtr compiles and gives nonsense.
+        // --- services -------------------------------------------------------
+
+        public delegate Client GetZeroInitializedClientFn();
+        public delegate EndpointOptions128 ClientGetDefaultOptionsFn();
+        public delegate int ClientInitFn(ref Client client, ref Node node,
+                                         IntPtr serviceTypeSupport,
+                                         [MarshalAs(UnmanagedType.LPStr)] string serviceName,
+                                         ref EndpointOptions128 options);
+        public delegate int ClientFiniFn(ref Client client, ref Node node);
+        public delegate int SendRequestFn(ref Client client, IntPtr nativeRequest,
+                                          out long sequenceNumber);
+        public delegate int TakeResponseFn(ref Client client, ref RequestId header,
+                                           IntPtr nativeResponse);
+
+        public delegate Service GetZeroInitializedServiceFn();
+        public delegate EndpointOptions128 ServiceGetDefaultOptionsFn();
+        public delegate int ServiceInitFn(ref Service service, ref Node node,
+                                          IntPtr serviceTypeSupport,
+                                          [MarshalAs(UnmanagedType.LPStr)] string serviceName,
+                                          ref EndpointOptions128 options);
+        public delegate int ServiceFiniFn(ref Service service, ref Node node);
+        public delegate int TakeRequestFn(ref Service service, ref RequestId header,
+                                          IntPtr nativeRequest);
+        public delegate int SendResponseFn(ref Service service, ref RequestId header,
+                                           IntPtr nativeResponse);
+
+        // Turning our CDR bytes into the native struct rcl wants, and back. One
+        // call each way, done by the middleware's own routines.
+        public delegate int SerializeFn(IntPtr nativeMessage, IntPtr messageTypeSupport,
+                                        ref SerializedMessage serialized);
+        public delegate int DeserializeFn(ref SerializedMessage serialized,
+                                          IntPtr messageTypeSupport, IntPtr nativeMessage);
+
+        // Allocating that native struct, without generating a line of C.
+        public delegate IntPtr CreateMessageFn();
+        public delegate void DestroyMessageFn(IntPtr message);
+
         public delegate ErrorString GetErrorStringFn();
         public delegate void ResetErrorFn();
         public delegate IntPtr GetTypeSupportFn();
@@ -301,6 +370,24 @@ namespace SeaNav.Ros2.Native
         public static T UtilsFn<T>(string name) where T : class
         {
             return NativeLoader.Function<T>(Rcutils, name);
+        }
+
+        /// <summary>librmw_implementation, which owns rmw_serialize.</summary>
+        public static IntPtr Rmw
+        {
+            get
+            {
+                if (_rmw == IntPtr.Zero) _rmw = NativeLoader.Load("rmw_implementation");
+                return _rmw;
+            }
+        }
+
+        private static IntPtr _rmw;
+
+        /// <summary>Bind a function from librmw_implementation.</summary>
+        public static T RmwFn<T>(string name) where T : class
+        {
+            return NativeLoader.Function<T>(Rmw, name);
         }
 
         /// <summary>
@@ -367,6 +454,104 @@ namespace SeaNav.Ros2.Native
         /// Not an error - just "nothing has arrived yet".
         /// </summary>
         public const int SubscriptionTakeFailed = 401;
+
+        // Easy to transpose, and I did. The CLIENT codes are the 500 series and
+        // the SERVICE codes the 600 series, per rcl/types.h. The wrong way round
+        // turns "nothing has arrived yet" into a thrown exception on the first
+        // poll, which is exactly how it presented.
+
+        /// <summary>RCL_RET_CLIENT_TAKE_FAILED. No reply yet. Not an error.</summary>
+        public const int ClientTakeFailed = 501;
+
+        /// <summary>RCL_RET_SERVICE_TAKE_FAILED. Nobody has called. Not an error.</summary>
+        public const int ServiceTakeFailed = 601;
+
+        /// <summary>
+        /// The service type support for e.g. <c>example_interfaces/srv/AddTwoInts</c>.
+        /// </summary>
+        /// <remarks>
+        /// The same trick as <see cref="MessageTypeSupport"/>, one symbol along:
+        /// every service package exports
+        /// <c>rosidl_typesupport_c__get_service_type_support_handle__pkg__srv__Name</c>.
+        /// </remarks>
+        public static IntPtr ServiceTypeSupport(string serviceType)
+        {
+            string[] parts = SplitType(serviceType, "srv");
+            IntPtr lib = NativeLoader.Load(parts[0] + "__rosidl_typesupport_c");
+            string symbol = "rosidl_typesupport_c__get_service_type_support_handle__"
+                            + parts[0] + "__" + parts[1] + "__" + parts[2];
+
+            IntPtr handle = NativeLoader.Function<GetTypeSupportFn>(lib, symbol)();
+            if (handle == IntPtr.Zero)
+                throw new InvalidOperationException(
+                    "service type support for " + serviceType + " came back null");
+            return handle;
+        }
+
+        /// <summary>
+        /// Message type support for one half of a service - the request or the
+        /// response - which is what rmw_serialize needs.
+        /// </summary>
+        public static IntPtr ServiceHalfTypeSupport(string serviceType, bool request)
+        {
+            string[] parts = SplitType(serviceType, "srv");
+            IntPtr lib = NativeLoader.Load(parts[0] + "__rosidl_typesupport_c");
+            string symbol = "rosidl_typesupport_c__get_message_type_support_handle__"
+                            + parts[0] + "__" + parts[1] + "__" + parts[2]
+                            + (request ? "_Request" : "_Response");
+
+            return NativeLoader.Function<GetTypeSupportFn>(lib, symbol)();
+        }
+
+        /// <summary>
+        /// Allocates the native struct rcl needs for one half of a service call.
+        /// </summary>
+        /// <remarks>
+        /// <b>This is what makes services possible without a code generator.</b>
+        /// Every message package exports <c>pkg__srv__Name_Request__create()</c>
+        /// beside the type support, so the struct can be allocated by name.
+        /// Together with rmw_deserialize, our CDR bytes reach rcl in one call
+        /// instead of field by field.
+        /// </remarks>
+        public static IntPtr CreateServiceMessage(string serviceType, bool request)
+        {
+            string[] parts = SplitType(serviceType, "srv");
+            IntPtr lib = NativeLoader.Load(parts[0] + "__rosidl_generator_c");
+            string symbol = parts[0] + "__" + parts[1] + "__" + parts[2]
+                            + (request ? "_Request" : "_Response") + "__create";
+
+            IntPtr message = NativeLoader.Function<CreateMessageFn>(lib, symbol)();
+            if (message == IntPtr.Zero)
+                throw new InvalidOperationException(
+                    "could not allocate a native " + serviceType +
+                    (request ? " request" : " response"));
+            return message;
+        }
+
+        /// <summary>Frees what <see cref="CreateServiceMessage"/> allocated.</summary>
+        public static void DestroyServiceMessage(string serviceType, bool request, IntPtr message)
+        {
+            if (message == IntPtr.Zero) return;
+
+            string[] parts = SplitType(serviceType, "srv");
+            IntPtr lib = NativeLoader.Load(parts[0] + "__rosidl_generator_c");
+            string symbol = parts[0] + "__" + parts[1] + "__" + parts[2]
+                            + (request ? "_Request" : "_Response") + "__destroy";
+
+            NativeLoader.Function<DestroyMessageFn>(lib, symbol)(message);
+        }
+
+        private static string[] SplitType(string typeName, string expectedKind)
+        {
+            if (string.IsNullOrEmpty(typeName)) throw new ArgumentNullException(nameof(typeName));
+
+            string[] parts = typeName.Split('/');
+            if (parts.Length != 3 || parts[1] != expectedKind)
+                throw new ArgumentException(
+                    "expected <package>/" + expectedKind + "/<Name>, got: " + typeName,
+                    nameof(typeName));
+            return parts;
+        }
 
         /// <summary>
         /// Every rcl function returns a number: 0 means it worked. This turns

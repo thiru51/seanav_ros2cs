@@ -285,6 +285,28 @@ namespace SeaNav.Ros2
             return subscription;
         }
 
+        /// <summary>Creates a client that calls a service.</summary>
+        /// <param name="serviceType">e.g. <c>example_interfaces/srv/AddTwoInts</c>.</param>
+        /// <param name="serviceName">e.g. <c>/add_two_ints</c>.</param>
+        public Ros2Client CreateClient(string serviceType, string serviceName, QosProfile qos = null)
+        {
+            if (_disposed) throw new ObjectDisposedException(nameof(Ros2Node));
+
+            Ros2Client client = new Ros2Client(this, serviceType, serviceName, qos);
+            _children.Add(client);
+            return client;
+        }
+
+        /// <summary>Offers a service that others can call.</summary>
+        public Ros2Service CreateService(string serviceType, string serviceName, QosProfile qos = null)
+        {
+            if (_disposed) throw new ObjectDisposedException(nameof(Ros2Node));
+
+            Ros2Service service = new Ros2Service(this, serviceType, serviceName, qos);
+            _children.Add(service);
+            return service;
+        }
+
         internal ref RclInterop.Node Handle => ref _node[0];
 
         internal Ros2Context Context => _context;
