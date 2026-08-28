@@ -109,6 +109,77 @@ namespace SeaNav.Ros2.Native
         }
 
         /// <summary>
+        /// Makes a reasonable guess at where ROS 2's libraries are on this
+        /// machine, so a user does not have to type a path they may not know.
+        /// </summary>
+        /// <remarks>
+        /// A guess, and treated as one - it is used to improve an error message
+        /// and as an optional convenience, never silently instead of what the
+        /// caller asked for. Returns null when nothing plausible is found.
+        ///
+        /// The order matters: an activated environment is checked before any
+        /// fixed location, because someone who has activated one means it.
+        /// </remarks>
+        public static string FindRosLibraryFolder()
+        {
+            var candidates = new List<string>();
+
+            // An active conda / RoboStack / pixi environment. On Windows conda
+            // puts DLLs under Library\bin; on Linux and macOS in lib.
+            string conda = Environment.GetEnvironmentVariable("CONDA_PREFIX");
+            if (!string.IsNullOrEmpty(conda))
+            {
+                candidates.Add(IsWindows ? Path.Combine(conda, "Library", "bin")
+                                         : Path.Combine(conda, "lib"));
+            }
+
+            // A sourced ROS install names its own prefix.
+            string ament = Environment.GetEnvironmentVariable("AMENT_PREFIX_PATH");
+            if (!string.IsNullOrEmpty(ament))
+            {
+                foreach (string prefix in ament.Split(IsWindows ? ';' : ':'))
+                {
+                    if (string.IsNullOrEmpty(prefix)) continue;
+                    candidates.Add(Path.Combine(prefix, IsWindows ? "bin" : "lib"));
+                }
+            }
+
+            string distro = Environment.GetEnvironmentVariable("ROS_DISTRO");
+
+            if (IsWindows)
+            {
+                foreach (string root in new[] { @"C:\dev", @"C:\opt", @"C:\" })
+                {
+                    if (!string.IsNullOrEmpty(distro))
+                        candidates.Add(Path.Combine(root, "ros2_" + distro, "bin"));
+                    candidates.Add(Path.Combine(root, "ros2", "bin"));
+                }
+            }
+            else
+            {
+                if (!string.IsNullOrEmpty(distro))
+                    candidates.Add("/opt/ros/" + distro + "/lib");
+
+                // Newest first, so a machine with two distributions gets the one
+                // most likely to be current rather than whichever sorts first.
+                foreach (string d in new[] { "kilted", "jazzy", "iron", "humble" })
+                    candidates.Add("/opt/ros/" + d + "/lib");
+            }
+
+            string wanted = IsWindows ? "rcl.dll" : "librcl.so";
+            foreach (string folder in candidates)
+            {
+                try
+                {
+                    if (File.Exists(Path.Combine(folder, wanted))) return folder;
+                }
+                catch { /* an unreadable candidate is simply not the answer */ }
+            }
+
+            return null;
+        }
+
+        /// <summary>
         /// Sets an environment variable so that NATIVE code can see it.
         /// </summary>
         /// <remarks>
