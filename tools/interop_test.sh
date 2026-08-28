@@ -115,6 +115,53 @@ check "'ros2 topic info' reports the right type" $? "the type support lookup was
 grep -q "Publisher count: 1" "$NODES"
 check "ROS counts one publisher" $? "the endpoint is registered properly"
 
+# ---------------------------------------------------------------- custom type
+#
+# SEANAV's own message type, seanav_msgs/msg/VesselState. This is a separate
+# check from the ones above because a custom type can fail in a way a standard
+# one cannot: the C# class is generated and compiles, but the native type
+# support library only exists if somebody ran colcon. Publishing is the only
+# thing that notices.
+# Collected into a variable first, deliberately. Writing this as
+#
+#     if ros2 interface list | grep -q seanav_msgs/msg/VesselState
+#
+# looks obviously right and is broken under `set -o pipefail`: grep -q exits
+# the moment it finds a match, ros2 gets SIGPIPE and dies with 141, and
+# pipefail then reports the whole pipeline as FAILED - precisely because the
+# match succeeded. The check skipped itself on a working install.
+INTERFACES="$(ros2 interface list 2>/dev/null || true)"
+
+if printf '%s\n' "$INTERFACES" | grep -q "seanav_msgs/msg/VesselState"; then
+    dotnet build -c Release "$HERE/examples/CustomTypeDemo/CustomTypeDemo.csproj" \
+        -p:SeaNavCore="$SEANAV/unity/Assets/SEANAV/Core/Runtime" >/dev/null 2>&1
+
+    CUSTOM="$(mktemp)"
+    dotnet run -c Release --no-build --project "$HERE/examples/CustomTypeDemo" -- 12 \
+        > /dev/null 2>&1 &
+    CUSTOM_PID=$!
+    sleep 4
+
+    timeout 10 ros2 topic echo --once /seanav/vessel_state > "$CUSTOM" 2>&1
+
+    kill $CUSTOM_PID 2>/dev/null
+    wait $CUSTOM_PID 2>/dev/null
+
+    grep -q "rudder_angle: 0.35" "$CUSTOM"
+    check "a CUSTOM type survives the round trip" $? "ros2 topic echo decoded seanav_msgs/msg/VesselState"
+
+    # Field order is where a hand-written serialiser goes wrong, and it goes
+    # wrong quietly - the message still decodes, with values in the wrong slots.
+    grep -q "water_depth: 18.75" "$CUSTOM"
+    check "custom type field ORDER is right" $? "the last field landed in the last slot"
+
+    rm -f "$CUSTOM"
+else
+    echo "  [SKIP] custom type: seanav_msgs is not built or not sourced."
+    echo "         cd \$SEANAV/ros2 && colcon build --packages-select seanav_msgs"
+    echo "         source \$SEANAV/ros2/install/setup.bash"
+fi
+
 rm -f "$OUT" "$GOT" "$NODES"
 
 echo

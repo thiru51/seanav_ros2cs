@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework>
+    <Nullable>disable</Nullable><AssemblyName>CustomTypeDemo</AssemblyName><NoWarn>1591;1573</NoWarn>
+  </PropertyGroup>
+  <ItemGroup><ProjectReference Include="../../src/SeaNav.Ros2/SeaNav.Ros2.csproj" /></ItemGroup>
+  <ItemGroup Condition="'$(SeaNavCore)' != ''">
+    <Compile Include="$(SeaNavCore)/Ros/Cdr.cs" Link="Cdr.cs" />
+    <Compile Include="$(SeaNavCore)/Ros/RosMessages.cs" Link="RosMessages.cs" />
+    <Compile Include="$(SeaNavCore)/Ros2Messages/*.cs" Link="Generated/%(Filename).cs" />
+  </ItemGroup>
+</Project>
